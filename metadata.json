@@ -1,0 +1,6 @@
+{
+  "name": "VOICE STUDIO by KLIK",
+  "description": "Agencia de Voces IA centralizada para crear, administrar y utilizar perfiles de voz autorizados para múltiples clientes, proyectos y marcas (NuestraParroquia.online, Comunidad de Radio, Locución, Publicidad, Narración, Podcast) con Voice Engine (MP3, WAV, STREAM).",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
