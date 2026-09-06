@@ -202,7 +202,7 @@ func (h *APIHandler) handleDownloadAudio(w http.ResponseWriter, r *http.Request)
 	}
 
 	w.Header().Set("Content-Type", locution.MimeType)
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\\"locucion_%s.%s\\"", locution.ID, ext))
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"locucion_%s.%s\"", locution.ID, ext))
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(locution.AudioData)))
 	w.Write(locution.AudioData)
 }

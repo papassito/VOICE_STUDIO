@@ -38,6 +38,16 @@ npm run build
 
 if (Test-Path "dist") {
     Write-Host "  ✅ Frontend y Servidor empaquetados en /dist correctamente." -ForegroundColor Green
+    
+    Write-Host "  📦 Convirtiendo Servidor Node Express en un binario ejecutable (.exe)..." -ForegroundColor Gray
+    if (-not (Test-Path "bin")) { New-Item -ItemType Directory -Path "bin" -Force | Out-Null }
+    # Compilar usando pkg (targets Node 20 para Windows x64)
+    & npx -p pkg pkg dist/server.cjs --targets node20-win-x64 --output bin/voicestudio-app.exe --public
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "  ✅ Servidor Node Express compilado en /bin/voicestudio-app.exe con éxito." -ForegroundColor Green
+    } else {
+        Write-Error "❌ Error: El empaquetado del servidor Node Express con pkg falló."
+    }
 } else {
     Write-Error "❌ Error: No se pudo generar la carpeta /dist de producción."
 }
@@ -57,9 +67,8 @@ if (Test-Path $goCodePath) {
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
     # Extraer pares de path y contenido embebido usando expresiones regulares
-    $matches = [regex]::Matches($tsContent, 'path:\s*[''"]([^''"]+)[''"][\s\S]*?content:\s*`([\s\S]*?)`')
-    $matches = [regex]::Matches($tsContent, 'path:\s*[''"]([^''"]+)[''"][\s\S]*?content:\s*`((?:[^`\\]|\\.)*)`')
-    foreach ($match in $matches) {
+    $goMatches = [regex]::Matches($tsContent, 'path:\s*[''"]([^''"]+)[''"][\s\S]*?content:\s*`((?:[^`\\]|\\.)*)`')
+    foreach ($match in $goMatches) {
         $path = $match.Groups[1].Value
         $content = $match.Groups[2].Value
         
@@ -71,8 +80,7 @@ if (Test-Path $goCodePath) {
         }
         
         # Limpiar secuencias de escape del string de TypeScript
-        $cleanContent = $content -replace '\\`', '`' -replace '\\\$', '$'
-        $cleanContent = $content -replace '\\`', '`'
+        $cleanContent = $content.Replace('\`', '`').Replace('\\', '\')
         
         # Escribir forzando codificación UTF-8 sin BOM
         [System.IO.File]::WriteAllText($targetPath, $cleanContent, $utf8NoBom)
@@ -87,7 +95,11 @@ if (Test-Path $goCodePath) {
         
         # Compilación estática de producción optimizada libre de depuradores
         go build -ldflags="-w -s" -o bin/voicestudio.exe cmd/server/main.go
-        Write-Host "  ✅ Binario Go compilado en /bin/voicestudio.exe con éxito." -ForegroundColor Green
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "  ✅ Binario Go compilado en /bin/voicestudio.exe con éxito." -ForegroundColor Green
+        } else {
+            Write-Error "❌ Error: La compilación del binario nativo de Go falló."
+        }
     } else {
         Write-Host "  ⚠️  Compilador de Go no detectado en PATH. Se omitirá la compilación del binario." -ForegroundColor Yellow
     }
@@ -109,8 +121,6 @@ if (Test-Path (Join-Path $scriptRoot "bin/voicestudio.exe")) {
 }
 
 $setupIconLine = ""
-if (Test-Path (Join-Path $scriptRoot "dist/favicon.ico")) {
-    $setupIconLine = "SetupIconFile=dist\favicon.ico"
 $iconPath = Join-Path $scriptRoot "dist\favicon.ico"
 if (Test-Path $iconPath -PathType Leaf) {
     $setupIconLine = "SetupIconFile=$iconPath"
@@ -151,13 +161,14 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Source: "dist\*"; DestDir: "{app}\dist"; Flags: recursesubdirs createallsubdirs ignoreversion
 Source: "package.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: ".env"; DestDir: "{app}"; Flags: ignoreversion onlyifdoesntexist
+Source: "bin\voicestudio-app.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
 $filesGoSection
 
 [Icons]
-; Acceso directo principal a la Consola de Cabina
-Name: "{autoprograms}\Voice Studio by KLIK"; Filename: "{app}\dist\server.cjs"; WorkingDir: "{app}"; Comment: "Arrancar consola Express de Voice Studio"
+; Acceso directo principal a la Consola llamando a Node.exe
+Name: "{autoprograms}\Voice Studio by KLIK"; Filename: "{app}\bin\voicestudio-app.exe"; WorkingDir: "{app}"; Comment: "Arrancar consola Express de Voice Studio"
 $iconsGoSection
-Name: "{userdesktop}\Voice Studio by KLIK"; Filename: "{app}\dist\server.cjs"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{commondesktop}\Voice Studio by KLIK"; Filename: "{app}\bin\voicestudio-app.exe"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Registry]
 ; Registrar variables de entorno de producción para Solusol.net
@@ -167,8 +178,14 @@ Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environmen
 Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environment"; ValueType: string; ValueName: "SOLUSOL_NAS_2_PATH"; ValueData: "//solusol-nas-2/mirror/voicestudio"; Flags: preservestringtype
 
 [Run]
+; Agregar regla en el Firewall de Windows para permitir tráfico en el puerto de emisión
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""Voice Studio by KLIK"" dir=in action=allow protocol=TCP localport=3000"; Flags: runhidden
 ; Levantar el servidor de forma inmediata tras completar la instalación
-Filename: "node.exe"; Parameters: "{app}\dist\server.cjs"; Description: "Iniciar Consola Express de Voice Studio (Solusol Hub)"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\bin\voicestudio-app.exe"; Description: "Iniciar Consola Express de Voice Studio (Solusol Hub)"; Flags: nowait postinstall skipifsilent
+
+[UninstallRun]
+; Eliminar la regla del Firewall limpiamente al remover la aplicación
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""Voice Studio by KLIK"""; Flags: runhidden
 "@
 
 Set-Content -Path $issPath -Value $issContent -Encoding UTF8 -Force
@@ -203,7 +220,7 @@ if ($isccPath) {
     # Crear un .env temporal de distribución si no existe para evitar fallos en la instalación
     $envFilePath = Join-Path $scriptRoot ".env"
     if (-not (Test-Path $envFilePath)) {
-        Set-Content -Path $envFilePath -Value "PORT=3000`nNODE_ENV=production" -Encoding UTF8
+        Set-Content -Path $envFilePath -Value "PORT=3000" -Encoding UTF8
     }
     
     # Invocar compilador ISCC

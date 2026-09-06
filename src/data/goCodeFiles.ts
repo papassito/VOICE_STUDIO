@@ -24,6 +24,7 @@ import (
 )
 
 func main() {
+	fmt.Println("🎙️  Iniciando Voice Studio...")
 	log.Println("==========================================================")
 	log.Println("🎙️  VOICE STUDIO by KLIK - Agencia Centralizada de Voces IA")
 	log.Println("    Aislamiento Multi-Tenant: NuestraParroquia, Comunidad de Radio, etc.")
@@ -188,7 +189,6 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"io"
 	"log"
 	"math"
 	"net/http"

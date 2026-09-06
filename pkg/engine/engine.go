@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"io"
 	"log"
 	"math"
 	"net/http"
@@ -78,7 +77,7 @@ func (e *GeminiVoiceEngine) StreamBroadcast(ctx context.Context, voice *models.V
 	w.Header().Set("X-Accel-Buffering", "no")
 
 	// Emitir evento inicial de sincronizaciÃ³n
-	fmt.Fprintf(w, "event: init\\ndata: {\\"project\\":\\"%s\\",\\"voice\\":\\"%s\\",\\"status\\":\\"connected\\"}\\n\\n",
+	fmt.Fprintf(w, "event: init\ndata: {\"project\":\"%s\",\"voice\":\"%s\",\"status\":\"connected\"}\n\n",
 		voice.ProjectID, voice.Name)
 	flusher.Flush()
 
@@ -100,7 +99,7 @@ func (e *GeminiVoiceEngine) StreamBroadcast(ctx context.Context, voice *models.V
 			}
 
 			chunkWav := EncodeWAV(pcmData[start:end], 24000, 1, 16)
-			fmt.Fprintf(w, "event: audio_chunk\\ndata: {\\"chunk_index\\":%d,\\"size_bytes\\":%d}\\n\\n", i, len(chunkWav))
+			fmt.Fprintf(w, "event: audio_chunk\ndata: {\"chunk_index\":%d,\"size_bytes\":%d}\n\n", i, len(chunkWav))
 			flusher.Flush()
 
 			// Emular cadencia de transmisiÃ³n radial
@@ -108,7 +107,7 @@ func (e *GeminiVoiceEngine) StreamBroadcast(ctx context.Context, voice *models.V
 		}
 	}
 
-	fmt.Fprintf(w, "event: complete\\ndata: {\\"status\\":\\"stream_finished\\"}\\n\\n")
+	fmt.Fprintf(w, "event: complete\ndata: {\"status\":\"stream_finished\"}\n\n")
 	flusher.Flush()
 	return nil
 }

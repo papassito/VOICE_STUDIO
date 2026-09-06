@@ -16,6 +16,7 @@ import (
 )
 
 func main() {
+	fmt.Println("ðŸŽ™ï¸  Iniciando Voice Studio...")
 	log.Println("==========================================================")
 	log.Println("ðŸŽ™ï¸  VOICE STUDIO by KLIK - Agencia Centralizada de Voces IA")
 	log.Println("    Aislamiento Multi-Tenant: NuestraParroquia, Comunidad de Radio, etc.")
