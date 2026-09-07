@@ -1,9 +1,11 @@
 import express, { Request, Response } from "express";
 import path from "path";
+import fs from "fs";
+import crypto from "crypto";
 import { GoogleGenAI } from "@google/genai";
 import { createServer as createViteServer } from "vite";
 import "dotenv/config";
-import { StudioProfile, PortableStudioProfilePackage, DEFAULT_BLANK_PROFILE } from "./src/data/projectData";
+import { StudioProfile, PortableStudioProfilePackage, DEFAULT_BLANK_PROFILE, SystemIdentity, AuthenticationSecret } from "./src/data/projectData";
 
 const app = express();
 const PORT = 3000;
@@ -17,44 +19,73 @@ let activeStudioProfile: StudioProfile = { ...DEFAULT_BLANK_PROFILE };
 let customPresetsDatabase: any[] = [];
 let customTemplatesDatabase: any[] = [];
 
-// In-Memory Database de la plataforma corporativa (Audit, Nodes e Identidades)
-let auditLogDatabase: any[] = [
-  {
-    id: "audit-init",
-    timestamp: new Date().toISOString(),
-    action: "PROFILE_CREATED",
-    payload: { message: "Instancia e infraestructura inicializadas en blanco." }
-  }
-];
-let nodesDatabase: any[] = [
-  {
-    id: "node-local-default",
-    name: "Local Core Processing Node",
-    type: "VOICE_NODE",
-    status: "active",
-    capabilities: ["synthesis", "normalization", "analysis"],
-    heartbeat: new Date().toISOString()
-  }
-];
-let identitiesDatabase: any[] = [
-  {
-    id: "identity-admin",
-    type: "SYSTEM_ADMIN",
-    name: "SOLUSOL Master Operator",
-    token: "SOLUSOL-MASTER-SECURE-TOKEN-2026"
-  }
-];
-
-function logAuditEvent(action: string, payload: any) {
-  const event = {
-    id: `audit-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-    timestamp: new Date().toISOString(),
-    action,
-    payload
-  };
-  auditLogDatabase.unshift(event);
-  console.log(`🧾 [AUDIT] ${action}:`, JSON.stringify(payload));
+// ==============================================================================
+// 💾 SISTEMA DE PERSISTENCIA Y SERVICIOS - PERSISTENT STORE & RUNTIME BUFFER
+// ==============================================================================
+const DATA_DIR = path.join(process.cwd(), "data");
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
 }
+
+/**
+ * AuditService: Implementa un buffer en memoria acotado (Bounded N)
+ * respaldado por un Persistent Store eficiente en formato JSON Lines (JSONL).
+ */
+class AuditService {
+  private runtimeBuffer: any[] = [];
+  private readonly filePath = path.join(DATA_DIR, "audit.jsonl");
+  private readonly maxBufferSize = 100; // Límite estricto en RAM
+
+  constructor() {
+    this.loadInitialBuffer();
+  }
+
+  private loadInitialBuffer() {
+    try {
+      if (fs.existsSync(this.filePath)) {
+        const content = fs.readFileSync(this.filePath, "utf-8");
+        const lines = content.trim().split("\n").filter(Boolean);
+        const parsedEvents = lines.map(line => JSON.parse(line));
+        // Obtener únicamente los últimos N registros para el búfer circular de ejecución
+        this.runtimeBuffer = parsedEvents.slice(-this.maxBufferSize).reverse();
+      } else {
+        this.log("PROFILE_CREATED", { message: "Instancia e infraestructura inicializadas en blanco." });
+      }
+    } catch (err) {
+      console.error("❌ [AuditService] Error cargando histórico de auditoría:", err);
+    }
+  }
+
+  public log(action: string, payload: any) {
+    const event = {
+      id: `audit-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      timestamp: new Date().toISOString(),
+      action,
+      payload
+    };
+
+    // 1. Escitura física no-bloqueante (Append-Only para máximo performance)
+    try {
+      fs.appendFileSync(this.filePath, JSON.stringify(event) + "\n", "utf-8");
+    } catch (err) {
+      console.error("❌ [AuditService] Error en Persistent Store:", err);
+    }
+
+    // 2. Control circular de memoria RAM (Bounded N)
+    this.runtimeBuffer.unshift(event);
+    if (this.runtimeBuffer.length > this.maxBufferSize) {
+      this.runtimeBuffer.pop();
+    }
+
+    console.log(`🧾 [AUDIT] ${action}:`, JSON.stringify(payload));
+  }
+
+  public getRuntimeBuffer(): any[] {
+    return this.runtimeBuffer;
+  }
+}
+
+const auditService = new AuditService();
 
 // Helper to construct WAV file buffer from raw 16-bit PCM (sampleRate 24000Hz, 1 channel)
 function pcmToWav(pcmBuffer: Buffer, sampleRate = 24000, numChannels = 1, bitsPerSample = 16): Buffer {
@@ -102,6 +133,66 @@ function generateSyntheticTonePcm(durationSec = 3, frequency = 220, sampleRate =
   }
   return buffer;
 }
+
+/**
+ * LocutionService: Gestiona la persistencia de locuciones generadas bajo
+ * el principio de aislamiento y límite circular de memoria en RAM de producción.
+ */
+class LocutionService {
+  private runtimeBuffer: LocutionRecord[] = [];
+  private readonly filePath = path.join(DATA_DIR, "locutions.json");
+  private readonly maxBufferSize = 50; // Últimas 50 locuciones en memoria
+
+  constructor() {
+    this.loadInitialBuffer();
+  }
+
+  private loadInitialBuffer() {
+    try {
+      if (fs.existsSync(this.filePath)) {
+        const rawData = fs.readFileSync(this.filePath, "utf-8");
+        const allLocutions: LocutionRecord[] = JSON.parse(rawData);
+        this.runtimeBuffer = allLocutions
+          .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+          .slice(0, this.maxBufferSize);
+      } else {
+        // Sembrar persistencia inicial si el Persistent Store está frío
+        fs.writeFileSync(this.filePath, JSON.stringify(initialLocutions, null, 2), "utf-8");
+        this.runtimeBuffer = [...initialLocutions];
+      }
+    } catch (err) {
+      console.error("❌ [LocutionService] Error cargando almacén persistente:", err);
+    }
+  }
+
+  public save(record: LocutionRecord) {
+    this.runtimeBuffer.unshift(record);
+    if (this.runtimeBuffer.length > this.maxBufferSize) {
+      this.runtimeBuffer.pop();
+    }
+
+    try {
+      let allLocutions: LocutionRecord[] = [];
+      if (fs.existsSync(this.filePath)) {
+        allLocutions = JSON.parse(fs.readFileSync(this.filePath, "utf-8"));
+      }
+      allLocutions.unshift(record);
+      fs.writeFileSync(this.filePath, JSON.stringify(allLocutions, null, 2), "utf-8");
+    } catch (err) {
+      console.error("❌ [LocutionService] Error escribiendo registro físico:", err);
+    }
+  }
+
+  public getRuntimeBuffer(projectId?: string): LocutionRecord[] {
+    if (projectId) {
+      return this.runtimeBuffer.filter((l) => l.projectId === projectId);
+    }
+    return this.runtimeBuffer;
+  }
+}
+
+let voicesDatabase: VoiceProfile[] = [...initialVoices];
+const locutionService = new LocutionService();
 
 // Helper to query Solusol.net Central production LLM (Hosted on Plesk / VPN)
 async function callSolusolLLM(prompt: string, systemInstruction?: string): Promise<string | null> {
@@ -474,8 +565,7 @@ const initialVoices: VoiceProfile[] = [
   }
 ];
 
-let voicesDatabase: VoiceProfile[] = [...initialVoices];
-let locutionsDatabase: LocutionRecord[] = [
+const initialLocutions: LocutionRecord[] = [
   {
     id: "loc-parroquia-001",
     projectId: "nuestraparroquia",
@@ -726,11 +816,7 @@ app.delete("/api/voices/:id", (req: Request, res: Response) => {
 // GET /api/locutions - Filter by client / tenant isolation
 app.get("/api/locutions", (req: Request, res: Response) => {
   const { projectId } = req.query;
-  if (projectId) {
-    const filtered = locutionsDatabase.filter((l) => l.projectId === projectId);
-    return res.json(filtered);
-  }
-  return res.json(locutionsDatabase);
+  return res.json(locutionService.getRuntimeBuffer(projectId as string));
 });
 
 // Helper to synthesize speech using Gemini TTS or studio fallback
@@ -869,8 +955,9 @@ app.post("/api/tts/generate", async (req: Request, res: Response) => {
     console.log(`📦 [SOLUSOL NAS Sync] Espejando archivo de audio en NAS Secundario: ${nasPath2}`);
     console.log(`🔒 [Plesk VPN Security] Integridad de transmisión encriptada y validada.`);
 
-    locutionsDatabase.unshift(record);
-
+    locutionService.save(record);
+    auditService.log("TAKE_RECORDED", { locutionId: record.id, projectId: record.projectId });
+    
     return res.json({
       success: true,
       record,

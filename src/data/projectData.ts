@@ -16,11 +16,22 @@ export interface NodeRegistryEntry {
   heartbeat: string;
 }
 
+// ==============================================================================
+// 🔐 SEPARACIÓN DE CONCEPTOS DE IDENTIDAD (IDENTITY DOMAIN)
+// ==============================================================================
+
 export interface SystemIdentity {
   id: string;
   type: string;
   name: string;
-  token: string;
+}
+
+export interface AuthenticationSecret {
+  identityId: string;
+  tokenHash: string;
+  salt: string;
+  createdAt: string;
+  expiresAt?: string;
 }
 
 // ==============================================================================

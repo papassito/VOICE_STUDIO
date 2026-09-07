@@ -8,6 +8,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"sync"
 	"time"
 
 	"voicestudio/pkg/models"
@@ -35,6 +36,7 @@ type VoiceEngine interface {
 // GeminiVoiceEngine implementa VoiceEngine usando la API de IA de Google Gemini
 type GeminiVoiceEngine struct {
 	apiKey        string
+	mu            sync.RWMutex
 	activeProfile StudioProfileConfig
 }
 
@@ -51,11 +53,29 @@ func NewGeminiVoiceEngine(ctx context.Context, apiKey string) (*GeminiVoiceEngin
 	}, nil
 }
 
-// UpdateProfile actualiza en caliente los metadatos de hardware y comportamiento de renderizado
-func (e *GeminiVoiceEngine) UpdateProfile(profile StudioProfileConfig) {
-	log.Printf("[SOLUSOL SIC API] Reconfigurando canal de audio para '%s' (%s) a %dHz, %d-bit", 
-		profile.ActiveBrandingName, profile.StudioType, profile.Hardware.SampleRate, profile.Hardware.BitDepth)
+// UpdateProfile actualiza en caliente los metadatos de hardware y comportamiento de renderizado.
+// Retorna true si los cambios físicos en los parámetros del hardware exigen reiniciar el pipeline de audio.
+func (e *GeminiVoiceEngine) UpdateProfile(profile StudioProfileConfig) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	requiresRestart := false
+	if e.activeProfile.Hardware.SampleRate != profile.Hardware.SampleRate ||
+		e.activeProfile.Hardware.BitDepth != profile.Hardware.BitDepth ||
+		e.activeProfile.Hardware.Channels != profile.Hardware.Channels {
+		requiresRestart = true
+	}
+
+	if requiresRestart {
+		log.Printf("[SOLUSOL SIC API] CAMBIO FÍSICO DETECTADO: El cambio a %dHz, %d-bit (canales: %d) requiere REINICIAR el pipeline de audio.",
+			profile.Hardware.SampleRate, profile.Hardware.BitDepth, profile.Hardware.Channels)
+	} else {
+		log.Printf("[SOLUSOL SIC API] Reconfiguración en caliente exitosa para branding '%s' (%s)",
+			profile.ActiveBrandingName, profile.StudioType)
+	}
+
 	e.activeProfile = profile
+	return requiresRestart
 }
 
 // Synthesize convierte texto en audio en formato WAV, MP3 o STREAM
@@ -69,13 +89,18 @@ func (e *GeminiVoiceEngine) Synthesize(ctx context.Context, voice *models.VoiceP
 
 	// 1. Obtener audio crudo PCM 24kHz (mediante Gemini API o fallback armÃ³nico de estudio)
 	// Usando dinámicamente la configuración del perfil activo
+	e.mu.RLock()
 	targetSampleRate := e.activeProfile.Hardware.SampleRate
+	channels := e.activeProfile.Hardware.Channels
+	bitDepth := e.activeProfile.Hardware.BitDepth
+	e.mu.RUnlock()
+
 	pcmData, duration := e.generatePCM(voice, text, targetSampleRate)
 
 	// 2. Transcodificar segÃºn el formato requerido (WAV o MP3)
 	switch format {
 	case models.FormatWAV:
-		wavBytes := EncodeWAV(pcmData, targetSampleRate, e.activeProfile.Hardware.Channels, e.activeProfile.Hardware.BitDepth)
+		wavBytes := EncodeWAV(pcmData, targetSampleRate, channels, bitDepth)
 		return wavBytes, duration, nil
 
 	case models.FormatMP3:
@@ -84,11 +109,11 @@ func (e *GeminiVoiceEngine) Synthesize(ctx context.Context, voice *models.VoiceP
 		return mp3Bytes, duration, nil
 
 	case models.FormatSTREAM:
-		wavBytes := EncodeWAV(pcmData, targetSampleRate, e.activeProfile.Hardware.Channels, e.activeProfile.Hardware.BitDepth)
+		wavBytes := EncodeWAV(pcmData, targetSampleRate, channels, bitDepth)
 		return wavBytes, duration, nil
 
 	default:
-		return EncodeWAV(pcmData, targetSampleRate, e.activeProfile.Hardware.Channels, e.activeProfile.Hardware.BitDepth), duration, nil
+		return EncodeWAV(pcmData, targetSampleRate, channels, bitDepth), duration, nil
 	}
 }
 
@@ -110,9 +135,14 @@ func (e *GeminiVoiceEngine) StreamBroadcast(ctx context.Context, voice *models.V
 	flusher.Flush()
 
 	// Segmentar texto en bloques para transmisiÃ³n fluida
+	e.mu.RLock()
 	targetSampleRate := e.activeProfile.Hardware.SampleRate
+	channels := e.activeProfile.Hardware.Channels
+	bitDepth := e.activeProfile.Hardware.BitDepth
+	e.mu.RUnlock()
+
 	pcmData, _ := e.generatePCM(voice, text, targetSampleRate)
-	chunkSize := targetSampleRate * (e.activeProfile.Hardware.BitDepth / 8) * e.activeProfile.Hardware.Channels // ~1 segundo de audio por chunk
+	chunkSize := targetSampleRate * (bitDepth / 8) * channels // ~1 segundo de audio por chunk
 
 	totalChunks := (len(pcmData) + chunkSize - 1) / chunkSize
 	for i := 0; i < totalChunks; i++ {
@@ -127,7 +157,7 @@ func (e *GeminiVoiceEngine) StreamBroadcast(ctx context.Context, voice *models.V
 				end = len(pcmData)
 			}
 
-			chunkWav := EncodeWAV(pcmData[start:end], targetSampleRate, e.activeProfile.Hardware.Channels, e.activeProfile.Hardware.BitDepth)
+			chunkWav := EncodeWAV(pcmData[start:end], targetSampleRate, channels, bitDepth)
 			fmt.Fprintf(w, "event: audio_chunk\ndata: {\"chunk_index\":%d,\"size_bytes\":%d}\n\n", i, len(chunkWav))
 			flusher.Flush()
 

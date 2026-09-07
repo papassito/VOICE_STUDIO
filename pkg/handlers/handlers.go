@@ -161,7 +161,7 @@ func (h *APIHandler) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"success":  true,
 		"locution": locution,
-		"download_url": fmt.Sprintf("/api/v1/locutions/%s/download", locution.ID),
+		"download_url": fmt.Sprintf("/api/v1/media/download/%s", locution.ID),
 	})
 }
 
