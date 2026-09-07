@@ -3,11 +3,58 @@ import path from "path";
 import { GoogleGenAI } from "@google/genai";
 import { createServer as createViteServer } from "vite";
 import "dotenv/config";
+import { StudioProfile, PortableStudioProfilePackage, DEFAULT_BLANK_PROFILE } from "./src/data/projectData";
 
 const app = express();
 const PORT = 3000;
 
 app.use(express.json({ limit: "15mb" }));
+
+// ==============================================================================
+// 🧠 CONFIGURACIÓN MAESTRA DINÁMICA - BLANK BY DEFAULT
+// ==============================================================================
+let activeStudioProfile: StudioProfile = { ...DEFAULT_BLANK_PROFILE };
+let customPresetsDatabase: any[] = [];
+let customTemplatesDatabase: any[] = [];
+
+// In-Memory Database de la plataforma corporativa (Audit, Nodes e Identidades)
+let auditLogDatabase: any[] = [
+  {
+    id: "audit-init",
+    timestamp: new Date().toISOString(),
+    action: "PROFILE_CREATED",
+    payload: { message: "Instancia e infraestructura inicializadas en blanco." }
+  }
+];
+let nodesDatabase: any[] = [
+  {
+    id: "node-local-default",
+    name: "Local Core Processing Node",
+    type: "VOICE_NODE",
+    status: "active",
+    capabilities: ["synthesis", "normalization", "analysis"],
+    heartbeat: new Date().toISOString()
+  }
+];
+let identitiesDatabase: any[] = [
+  {
+    id: "identity-admin",
+    type: "SYSTEM_ADMIN",
+    name: "SOLUSOL Master Operator",
+    token: "SOLUSOL-MASTER-SECURE-TOKEN-2026"
+  }
+];
+
+function logAuditEvent(action: string, payload: any) {
+  const event = {
+    id: `audit-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+    timestamp: new Date().toISOString(),
+    action,
+    payload
+  };
+  auditLogDatabase.unshift(event);
+  console.log(`🧾 [AUDIT] ${action}:`, JSON.stringify(payload));
+}
 
 // Helper to construct WAV file buffer from raw 16-bit PCM (sampleRate 24000Hz, 1 channel)
 function pcmToWav(pcmBuffer: Buffer, sampleRate = 24000, numChannels = 1, bitsPerSample = 16): Buffer {
@@ -510,11 +557,89 @@ app.get("/api/health", (_req: Request, res: Response) => {
     productionHouse: "solusol.net",
     architecture: "Multi-Tenant Isolated Voice Engine",
     nasOnline: true,
+    activeInstance: {
+      id: activeStudioProfile.id,
+      type: activeStudioProfile.type,
+      brandingName: activeStudioProfile.branding.name
+    },
     nasUnits: ["SOLUSOL_NAS_01", "SOLUSOL_NAS_02"],
     geminiConfigured: Boolean(process.env.GEMINI_API_KEY),
     solusolConfigured: Boolean(process.env.SOLUSOL_TTS_URL || process.env.SOLUSOL_LLM_URL),
     formatsSupported: ["MP3", "WAV", "STREAM"]
   });
+});
+
+// ==============================================================================
+// 🛠️ ENDPOINTS DE PERFIL DE ESTUDIO (Fase 0 — Foundation)
+// ==============================================================================
+
+// GET /api/profile - Obtener el perfil activo y validar si requiere Wizard (OOBE)
+app.get("/api/profile", (_req: Request, res: Response) => {
+  const isNewInstance = activeStudioProfile.id === 'blank-instance-uuid' || 
+                        activeStudioProfile.branding.name === 'Estudio sin Configurar';
+  
+  return res.json({
+    profile: activeStudioProfile,
+    isNewInstance,
+    customPresetsCount: customPresetsDatabase.length,
+    customTemplatesCount: customTemplatesDatabase.length
+  });
+});
+
+// POST /api/profile - Guardar o reconfigurar la Studio Instance en caliente
+app.post("/api/profile", (req: Request, res: Response) => {
+  try {
+    const updatedProfile = req.body as StudioProfile;
+    if (!updatedProfile || !updatedProfile.branding || !updatedProfile.branding.name) {
+      return res.status(400).json({ error: "Perfil de estudio inválido o falta nombre del Studio" });
+    }
+
+    // Si es la inicialización del Blank Profile, generar UUID único
+    if (updatedProfile.id === 'blank-instance-uuid') {
+      updatedProfile.id = `studio-instance-${Date.now()}`;
+    }
+
+    activeStudioProfile = { ...updatedProfile };
+
+    console.log(`⚙️ [Studio Profile] Reconfigurando canal físico para "${activeStudioProfile.branding.name}"`);
+    console.log(`   └─ Modo de Operación: ${activeStudioProfile.preferences.uiMode}`);
+    console.log(`   └─ Audio de Retorno: ${activeStudioProfile.hardware.sampleRate}Hz @ ${activeStudioProfile.hardware.bitDepth}-bit`);
+
+    return res.json({
+      success: true,
+      profile: activeStudioProfile
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/profile/export - Generar paquete portable unificado (.vstudio-profile)
+app.post("/api/profile/export", (_req: Request, res: Response) => {
+  const exportPackage: PortableStudioProfilePackage = {
+    version: "1.0.0",
+    exportedAt: new Date().toISOString(),
+    profile: activeStudioProfile,
+    customPresets: customPresetsDatabase,
+    customTemplates: customTemplatesDatabase
+  };
+  return res.json(exportPackage);
+});
+
+// POST /api/profile/import - Importar configuración en caliente
+app.post("/api/profile/import", (req: Request, res: Response) => {
+  try {
+    const importPackage = req.body as PortableStudioProfilePackage;
+    if (!importPackage || importPackage.version !== "1.0.0" || !importPackage.profile) {
+      return res.status(400).json({ error: "Estructura .vstudio-profile incompatible o corrupta" });
+    }
+    activeStudioProfile = { ...importPackage.profile };
+    customPresetsDatabase = importPackage.customPresets || [];
+    customTemplatesDatabase = importPackage.customTemplates || [];
+    return res.json({ success: true, profile: activeStudioProfile });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 // GET /api/voices - Filter by projectId or return catalog

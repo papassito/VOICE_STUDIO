@@ -13,6 +13,18 @@ import (
 	"voicestudio/pkg/models"
 )
 
+// StudioProfileConfig representa la porción de hardware y codificación del perfil dinámico
+type StudioProfileConfig struct {
+	ID         string `json:"id"`
+	StudioType string `json:"type"`
+	Hardware   struct {
+		SampleRate int `json:"sampleRate"`
+		BitDepth   int `json:"bitDepth"`
+		Channels   int `json:"channels"`
+	} `json:"hardware"`
+	ActiveBrandingName string `json:"brandingName"`
+}
+
 // VoiceEngine define la interfaz central para la transformaciÃ³n de Texto a Audio
 type VoiceEngine interface {
 	Synthesize(ctx context.Context, voice *models.VoiceProfile, text string, format models.AudioFormat) ([]byte, float64, error)
@@ -22,14 +34,28 @@ type VoiceEngine interface {
 
 // GeminiVoiceEngine implementa VoiceEngine usando la API de IA de Google Gemini
 type GeminiVoiceEngine struct {
-	apiKey string
+	apiKey        string
+	activeProfile StudioProfileConfig
 }
 
 // NewGeminiVoiceEngine crea una nueva instancia del motor de voz
 func NewGeminiVoiceEngine(ctx context.Context, apiKey string) (*GeminiVoiceEngine, error) {
+	// Instancia compatible con la plataforma de APIs SOLUSOL.NET SIC y KLIK Soft PRO
+	defaultProfile := StudioProfileConfig{}
+	defaultProfile.Hardware.SampleRate = 44100
+	defaultProfile.Hardware.BitDepth = 24
+	defaultProfile.Hardware.Channels = 1
 	return &GeminiVoiceEngine{
-		apiKey: apiKey,
+		apiKey:        apiKey,
+		activeProfile: defaultProfile,
 	}, nil
+}
+
+// UpdateProfile actualiza en caliente los metadatos de hardware y comportamiento de renderizado
+func (e *GeminiVoiceEngine) UpdateProfile(profile StudioProfileConfig) {
+	log.Printf("[SOLUSOL SIC API] Reconfigurando canal de audio para '%s' (%s) a %dHz, %d-bit", 
+		profile.ActiveBrandingName, profile.StudioType, profile.Hardware.SampleRate, profile.Hardware.BitDepth)
+	e.activeProfile = profile
 }
 
 // Synthesize convierte texto en audio en formato WAV, MP3 o STREAM
@@ -38,29 +64,31 @@ func (e *GeminiVoiceEngine) Synthesize(ctx context.Context, voice *models.VoiceP
 		return nil, 0, fmt.Errorf("la voz '%s' no cuenta con autorizaciÃ³n para generar locuciones", voice.Name)
 	}
 
-	log.Printf("[Voice Engine] Sintetizando para proyecto '%s' con voz '%s' (%s) en formato %s",
+	log.Printf("[KLIK Soft PRO API] Sintetizando para proyecto '%s' con voz '%s' (%s) en formato %s",
 		voice.ProjectID, voice.Name, voice.GeminiVoice, format)
 
 	// 1. Obtener audio crudo PCM 24kHz (mediante Gemini API o fallback armÃ³nico de estudio)
-	pcmData, duration := e.generatePCM(voice, text)
+	// Usando dinámicamente la configuración del perfil activo
+	targetSampleRate := e.activeProfile.Hardware.SampleRate
+	pcmData, duration := e.generatePCM(voice, text, targetSampleRate)
 
 	// 2. Transcodificar segÃºn el formato requerido (WAV o MP3)
 	switch format {
 	case models.FormatWAV:
-		wavBytes := EncodeWAV(pcmData, 24000, 1, 16)
+		wavBytes := EncodeWAV(pcmData, targetSampleRate, e.activeProfile.Hardware.Channels, e.activeProfile.Hardware.BitDepth)
 		return wavBytes, duration, nil
 
 	case models.FormatMP3:
 		// Para MP3 en Go puro, encapsulamos en encabezado MP3 optimizado para streaming
-		mp3Bytes := EncodeMP3Frame(pcmData, 24000)
+		mp3Bytes := EncodeMP3Frame(pcmData, targetSampleRate)
 		return mp3Bytes, duration, nil
 
 	case models.FormatSTREAM:
-		wavBytes := EncodeWAV(pcmData, 24000, 1, 16)
+		wavBytes := EncodeWAV(pcmData, targetSampleRate, e.activeProfile.Hardware.Channels, e.activeProfile.Hardware.BitDepth)
 		return wavBytes, duration, nil
 
 	default:
-		return EncodeWAV(pcmData, 24000, 1, 16), duration, nil
+		return EncodeWAV(pcmData, targetSampleRate, e.activeProfile.Hardware.Channels, e.activeProfile.Hardware.BitDepth), duration, nil
 	}
 }
 
@@ -82,8 +110,9 @@ func (e *GeminiVoiceEngine) StreamBroadcast(ctx context.Context, voice *models.V
 	flusher.Flush()
 
 	// Segmentar texto en bloques para transmisiÃ³n fluida
-	pcmData, _ := e.generatePCM(voice, text)
-	chunkSize := 24000 * 2 // ~1 segundo de audio por chunk (24000 samples * 2 bytes)
+	targetSampleRate := e.activeProfile.Hardware.SampleRate
+	pcmData, _ := e.generatePCM(voice, text, targetSampleRate)
+	chunkSize := targetSampleRate * (e.activeProfile.Hardware.BitDepth / 8) * e.activeProfile.Hardware.Channels // ~1 segundo de audio por chunk
 
 	totalChunks := (len(pcmData) + chunkSize - 1) / chunkSize
 	for i := 0; i < totalChunks; i++ {
@@ -98,7 +127,7 @@ func (e *GeminiVoiceEngine) StreamBroadcast(ctx context.Context, voice *models.V
 				end = len(pcmData)
 			}
 
-			chunkWav := EncodeWAV(pcmData[start:end], 24000, 1, 16)
+			chunkWav := EncodeWAV(pcmData[start:end], targetSampleRate, e.activeProfile.Hardware.Channels, e.activeProfile.Hardware.BitDepth)
 			fmt.Fprintf(w, "event: audio_chunk\ndata: {\"chunk_index\":%d,\"size_bytes\":%d}\n\n", i, len(chunkWav))
 			flusher.Flush()
 
@@ -113,9 +142,8 @@ func (e *GeminiVoiceEngine) StreamBroadcast(ctx context.Context, voice *models.V
 }
 
 // generatePCM produce el buffer de audio PCM de 16 bits little-endian a 24000Hz
-func (e *GeminiVoiceEngine) generatePCM(voice *models.VoiceProfile, text string) ([]byte, float64) {
+func (e *GeminiVoiceEngine) generatePCM(voice *models.VoiceProfile, text string, sampleRate int) ([]byte, float64) {
 	durationSec := math.Max(2.5, float64(len(text))/15.0)
-	sampleRate := 24000
 	numSamples := int(float64(sampleRate) * durationSec)
 
 	buf := new(bytes.Buffer)

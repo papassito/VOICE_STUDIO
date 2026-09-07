@@ -605,21 +605,24 @@ func NewAPIHandler(store storage.Store, engine engine.VoiceEngine) *APIHandler {
 	}
 }
 
-// RegisterRoutes expone los endpoints requeridos por la arquitectura de Voice Studio
+// RegisterRoutes expone los endpoints unificados de SOLUSOL.NET SIC y KLIK Soft PRO
 func (h *APIHandler) RegisterRoutes(mux *http.ServeMux) {
-	// Proyectos e Identidades
-	mux.HandleFunc("GET /api/v1/projects", h.handleListProjects)
-	mux.HandleFunc("GET /api/v1/voices", h.handleListVoices)
-	mux.HandleFunc("POST /api/v1/voices", h.handleCreateVoice)
-	mux.HandleFunc("PUT /api/v1/voices/{id}/authorize", h.handleToggleAuthorize)
+	// Studio e Identidad
+	mux.HandleFunc("GET /api/v1/studio/profile", h.handleGetStudioProfile)
 
-	// Voice Engine: Transformación Texto -> Audio
-	mux.HandleFunc("POST /api/v1/voice-engine/generate", h.handleGenerate)
-	mux.HandleFunc("GET /api/v1/voice-engine/stream", h.handleStream)
+	// Media e Ingestión
+	mux.HandleFunc("GET /api/v1/media/voices", h.handleListVoices)
+	mux.HandleFunc("POST /api/v1/media/voices", h.handleCreateVoice)
+	mux.HandleFunc("GET /api/v1/media/recordings", h.handleListLocutions)
+	mux.HandleFunc("GET /api/v1/media/download/{id}", h.handleDownloadAudio)
 
-	// Historial y Descargas
-	mux.HandleFunc("GET /api/v1/locutions", h.handleListLocutions)
-	mux.HandleFunc("GET /api/v1/locutions/{id}/download", h.handleDownloadAudio)
+	// Voice, AI y Audio
+	mux.HandleFunc("POST /api/v1/voice/synthesize", h.handleGenerate)
+	mux.HandleFunc("GET /api/v1/voice/stream", h.handleStream)
+
+	// Infraestructura y Monitoreo
+	mux.HandleFunc("GET /api/v1/nodes", h.handleListNodes)
+	mux.HandleFunc("GET /api/v1/audit", h.handleListAuditLogs)
 }
 
 func (h *APIHandler) handleListProjects(w http.ResponseWriter, r *http.Request) {
@@ -640,6 +643,41 @@ func (h *APIHandler) handleListProjects(w http.ResponseWriter, r *http.Request) 
 		},
 	}
 	writeJSON(w, http.StatusOK, projects)
+}
+
+func (h *APIHandler) handleGetStudioProfile(w http.ResponseWriter, r *http.Request) {
+	profile := map[string]interface{}{
+		"id": "go-native-instance",
+		"type": "RADIO",
+		"branding": map[string]string{
+			"name": "SOLUSOL Go Native Broadcast Studio",
+		},
+	}
+	writeJSON(w, http.StatusOK, profile)
+}
+
+func (h *APIHandler) handleListNodes(w http.ResponseWriter, r *http.Request) {
+	nodes := []map[string]interface{}{
+		{
+			"id": "go-native-node",
+			"name": "Go Native DSP Render Node",
+			"type": "RENDER_NODE",
+			"status": "active",
+		},
+	}
+	writeJSON(w, http.StatusOK, nodes)
+}
+
+func (h *APIHandler) handleListAuditLogs(w http.ResponseWriter, r *http.Request) {
+	logs := []map[string]interface{}{
+		{
+			"id": "audit-go-init",
+			"timestamp": time.Now().Format(time.RFC3339),
+			"action": "GO_ENGINE_STARTED",
+			"payload": map[string]string{"status": "ok"},
+		},
+	}
+	writeJSON(w, http.StatusOK, logs)
 }
 
 func (h *APIHandler) handleListVoices(w http.ResponseWriter, r *http.Request) {

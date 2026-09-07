@@ -1,5 +1,160 @@
 import { ProjectConfig, VoiceProfile } from '../types';
 
+export interface AuditLogEntry {
+  id: string;
+  timestamp: string;
+  action: string;
+  payload: any;
+}
+
+export interface NodeRegistryEntry {
+  id: string;
+  name: string;
+  type: 'VOICE_NODE' | 'AUDIO_NODE' | 'AI_NODE' | 'RENDER_NODE' | 'STORAGE_NODE' | 'TRANSCRIPTION_NODE' | 'SYNTHESIS_NODE';
+  status: 'active' | 'offline' | 'busy';
+  capabilities: string[];
+  heartbeat: string;
+}
+
+export interface SystemIdentity {
+  id: string;
+  type: string;
+  name: string;
+  token: string;
+}
+
+// ==============================================================================
+// 🧠 NUEVAS INTERFACES DE DOMINIO - ESTUDIO CONFIGURABLE (FASE 0 — FOUNDATION)
+// ==============================================================================
+
+export type StudioType = 
+  | 'RADIO' 
+  | 'TELEVISION' 
+  | 'PODCAST' 
+  | 'VOICE-OVER' 
+  | 'AUDIOBOOK' 
+  | 'DUBBING' 
+  | 'CORPORATE' 
+  | 'ADVERTISING' 
+  | 'PRODUCTION' 
+  | 'CUSTOM';
+
+export interface HardwareConfig {
+  inputDevice: string;
+  outputDevice: string;
+  monitorDevice: string;
+  sampleRate: 24000 | 44100 | 48000;
+  bitDepth: 16 | 24 | 32;
+  channels: 1 | 2; // Mono / Stereo
+  latencyBufferSize: number; // e.g., 256, 512, 1024 samples
+}
+
+export interface StudioBranding {
+  name: string;
+  logoUrl?: string;
+  tagline?: string;
+  description?: string;
+  primaryColor: string;
+  accentColor: string;
+}
+
+export interface StudioProfile {
+  id: string; // UUID de la instancia
+  type: StudioType;
+  branding: StudioBranding;
+  organization: {
+    companyName: string;
+    department?: string;
+    location?: string;
+  };
+  hardware: HardwareConfig;
+  exportDefaults: {
+    format: 'WAV' | 'MP3' | 'FLAC' | 'AAC';
+    loudnessTargetLUFS: number; // e.g., -14 (Podcast), -23 (TV), -16 (Mobile)
+    normalizeToMaxPeakDb: number; // e.g., -1.0 dB
+  };
+  ducking: {
+    enabled: boolean;
+    thresholdDb: number;
+    attenuationDb: number;
+    attackMs: number;
+    releaseMs: number;
+  };
+  preferences: {
+    language: 'es' | 'en' | 'fr' | 'pt';
+    uiMode: 'TALENT' | 'PRODUCER' | 'ENGINEER';
+    autosaveIntervalMinutes: number;
+    commandPaletteShortcut: string;
+  };
+}
+
+/**
+ * Payload de exportación unificado (.vstudio-profile)
+ * Este archivo plano JSON permite empaquetar y transferir configuraciones
+ * completas entre estudios sin mezclar proyectos ni bibliotecas pesadas.
+ */
+export interface PortableStudioProfilePackage {
+  version: string; // Versión del esquema del perfil (e.g., "1.0.0")
+  exportedAt: string; // ISO Timestamp
+  profile: StudioProfile;
+  customPresets: Array<{
+    id: string;
+    name: string;
+    category: string;
+    eqSettings: any;
+    compressorSettings: any;
+    limiterSettings: any;
+  }>;
+  customTemplates: Array<{
+    id: string;
+    name: string;
+    tracksLayout: any[];
+  }>;
+}
+
+/**
+ * Estado inicial "BLANK BY DEFAULT" para arranque en frío de la aplicación.
+ */
+export const DEFAULT_BLANK_PROFILE: StudioProfile = {
+  id: 'blank-instance-uuid',
+  type: 'CUSTOM',
+  branding: {
+    name: 'Estudio sin Configurar',
+    primaryColor: '#475569', // Slate por defecto
+    accentColor: '#94a3b8',
+  },
+  organization: {
+    companyName: 'Instalación Nueva',
+  },
+  hardware: {
+    inputDevice: 'Default System Input',
+    outputDevice: 'Default System Output',
+    monitorDevice: 'None',
+    sampleRate: 44100,
+    bitDepth: 24,
+    channels: 1,
+    latencyBufferSize: 512,
+  },
+  exportDefaults: {
+    format: 'WAV',
+    loudnessTargetLUFS: -16,
+    normalizeToMaxPeakDb: -1.0,
+  },
+  ducking: {
+    enabled: false,
+    thresholdDb: -24,
+    attenuationDb: -12,
+    attackMs: 10,
+    releaseMs: 300,
+  },
+  preferences: {
+    language: 'es',
+    uiMode: 'ENGINEER',
+    autosaveIntervalMinutes: 5,
+    commandPaletteShortcut: 'Ctrl+P',
+  }
+};
+
 export const PROJECTS: Record<string, ProjectConfig> = {
   'nuestraparroquia': {
     id: 'nuestraparroquia',
