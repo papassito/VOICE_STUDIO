@@ -27,7 +27,7 @@ type MemoryStore struct {
 	locutions map[string]*models.LocutionRecord
 }
 
-// NewMemoryStore inicializa el catÃ¡logo con las voces oficiales pre-configuradas
+// NewMemoryStore inicializa el catálogo con las voces oficiales pre-configuradas
 func NewMemoryStore() *MemoryStore {
 	s := &MemoryStore{
 		projects:  make(map[models.ProjectID]*models.Project),
@@ -40,14 +40,14 @@ func NewMemoryStore() *MemoryStore {
 		ID:          models.ProjectNuestraParroquia,
 		Name:        "NuestraParroquia.online",
 		Domain:      "nuestraparroquia.online",
-		Description: "Plataforma de voz pastoral para homilÃ­as, avisos litÃºrgicos y comunidad de fe.",
+		Description: "Plataforma de voz pastoral para homilías, avisos litúrgicos y comunidad de fe.",
 		Active:      true,
 	}
 	s.projects[models.ProjectComunidadRadio] = &models.Project{
 		ID:          models.ProjectComunidadRadio,
 		Name:        "Comunidad de Radio",
 		Domain:      "comunidadradio.live",
-		Description: "Estudio radial para locutores titulares, cuÃ±as publicitarias y transmisiÃ³n continua.",
+		Description: "Estudio radial para locutores titulares, cuñas publicitarias y transmisión continua.",
 		Active:      true,
 	}
 
@@ -56,8 +56,8 @@ func NewMemoryStore() *MemoryStore {
 		ID:           "voice-padre-x",
 		ProjectID:    models.ProjectNuestraParroquia,
 		Name:         "Padre X",
-		Role:         "PÃ¡rroco & GuÃ­a Espiritual",
-		GeminiVoice:  "Charon",
+		Role:         "Párroco & Guía Espiritual",
+		KlikVoice:    "solusol-deep",
 		Tone:         "Solemne, pausado, reflexivo y pastoral",
 		Pitch:        0.95,
 		Speed:        0.92,
@@ -69,8 +69,8 @@ func NewMemoryStore() *MemoryStore {
 		ProjectID:    models.ProjectNuestraParroquia,
 		Name:         "Lectora Parroquial",
 		Role:         "Lecturas y Salmos",
-		GeminiVoice:  "Kore",
-		Tone:         "CÃ¡lido, respetuoso y diÃ¡fano",
+		KlikVoice:    "solusol-bright",
+		Tone:         "Cálido, respetuoso y diáfano",
 		Pitch:        1.0,
 		Speed:        0.95,
 		IsAuthorized: true,
@@ -81,9 +81,9 @@ func NewMemoryStore() *MemoryStore {
 	s.voices["voice-voz-b-master"] = &models.VoiceProfile{
 		ID:           "voice-voz-b-master",
 		ProjectID:    models.ProjectComunidadRadio,
-		Name:         "Voz B (MÃ¡ster Cadena)",
+		Name:         "Voz B (Máster Cadena)",
 		Role:         "Locutor Master de Cadena",
-		GeminiVoice:  "Charon",
+		KlikVoice:    "solusol-deep",
 		Tone:         "Imponente, autoritario y de alto impacto radial",
 		Pitch:        0.90,
 		Speed:        0.98,
@@ -94,22 +94,22 @@ func NewMemoryStore() *MemoryStore {
 		ID:           "voice-fm-nocturna",
 		ProjectID:    models.ProjectComunidadRadio,
 		Name:         "Conductora FM Nocturna",
-		Role:         "ConducciÃ³n de MagacÃ­n Nocturno",
-		GeminiVoice:  "Kore",
-		Tone:         "Aterciopelado, Ã­ntimo y empÃ¡tico",
+		Role:         "Conducción de Magacín Nocturno",
+		KlikVoice:    "solusol-bright",
+		Tone:         "Aterciopelado, íntimo y empático",
 		Pitch:        1.02,
 		Speed:        0.94,
 		IsAuthorized: true,
 		CreatedAt:    time.Now(),
 	}
 
-	// 4. LocuciÃ³n e Institucional (Voz C)
+	// 4. Locución e Institucional (Voz C)
 	s.voices["voice-voz-c-institucional"] = &models.VoiceProfile{
 		ID:           "voice-voz-c-institucional",
 		ProjectID:    models.ProjectLocucion,
 		Name:         "Voz C (Locutor Institucional)",
 		Role:         "Voz Institucional & Corporativa",
-		GeminiVoice:  "Zephyr",
+		KlikVoice:    "klik-master",
 		Tone:         "Seguro, elegante, prestigioso y articulado",
 		Pitch:        0.98,
 		Speed:        1.0,
@@ -130,7 +130,7 @@ func (s *MemoryStore) GetProject(id models.ProjectID) (*models.Project, error) {
 	return p, nil
 }
 
-// ListVoices filtra estrictamente por ProjectID garantizando la separaciÃ³n de identidades
+// ListVoices filtra estrictamente por ProjectID garantizando la separación de identidades
 func (s *MemoryStore) ListVoices(projectID models.ProjectID) []*models.VoiceProfile {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -187,7 +187,7 @@ func (s *MemoryStore) GetLocution(id string) (*models.LocutionRecord, error) {
 	defer s.mu.RUnlock()
 	l, ok := s.locutions[id]
 	if !ok {
-		return nil, fmt.Errorf("locuciÃ³n '%s' no encontrada", id)
+		return nil, fmt.Errorf("locución '%s' no encontrada", id)
 	}
 	return l, nil
 }

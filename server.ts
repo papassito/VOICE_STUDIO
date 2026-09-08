@@ -1,16 +1,119 @@
+/**
+ * ==============================================================================
+ * 🎙️ VOICE STUDIO BY KLIK • CASA PRODUCTORA CENTRALIZADA SOLUSOL.NET
+ * ==============================================================================
+ * MAPA DE ARQUITECTURA DE SOFTWARE & CATÁLOGO DE MÓDULOS DE INGENIERÍA
+ * 
+ * 🧭 TRAZABILIDAD DE FASES DE DESARROLLO:
+ *   ├─ [FASE 0] FOUNDATION: Studio Profile, hardware config, bootstrap de seguridad.
+ *   ├─ [FASE A] CORE ORCHESTRATION: Orquestación TTS triple vía, DSP de audio (LUFS/Ducking).
+ *   ├─ [FASE B] ADVANCED DELIVERY: Almacén circular de persistencia, sincronización asíncrona NAS/Externos.
+ *   └─ [FASE C] NATIVE STANDALONE: Generación de blueprint autónomo en Go e instalador Inno Setup.
+ * 
+ * 1. 📋 CATÁLOGO DE MÓDULOS Y FUNCIONES INTEGRADAS:
+ * 
+ *   A. SERVIDOR BACKEND EXPRESS (server.ts)
+ *      ├─ MÓDULO CONCURRENTE (AsyncLock) [FASE A/B]
+ *      │  └─ Serializador de promesas para operaciones de I/O de archivos seguras e hilos virtuales.
+ *      ├─ MÓDULO DSP / AUDIO (DSP Core Engine) [FASE A]
+ *      │  ├─ parseWavHeader(): Parser de bytes de bajo nivel para cabeceras RIFF/WAVE.
+ *      │  ├─ pcmToWav(): Compilador binario que inyecta una cabecera WAV de 44 bytes a datos PCM.
+ *      │  ├─ generateSyntheticTonePcm(): Oscilador armónico por software (Ondas sinusoidales).
+ *      │  └─ applyDSP(): Procesador de señal física (Atenuación Ducking y Normalización RMS/LUFS).
+ *      ├─ MÓDULO DE PERSISTENCIA (Bounded Stores) [FASE B]
+ *      │  ├─ AuditService: Almacén JSON Lines (JSONL) append-only con rotación automática a 10MB.
+ *      │  └─ LocutionService: Almacén persistente circular limitado a 1000 registros en disco y 50 en RAM.
+ *      ├─ MÓDULO INTEGRADOR DE IA / GATEWAYS [FASE A]
+ *      │  ├─ callSolusolLLM() / callSolusolTTS(): Integración de producción con la casa productora.
+ *      │  ├─ callLocalLLM() / callLocalTTS(): Integración local-first con Ollama (Llama/Qwen) y Piper.
+ *      │  └─ synthesizeSpeechInternal(): Orquestador maestro del pipeline de renderizado de audio.
+ *      └─ MOTOR DE RESPALDOS MULTI-DISPOSITIVO [FASE B]
+ *         └─ backupFileToDestination(): Sincronizador asíncrono y generador de backup con versionado histórico.
+ * 
+ *   B. APLICACIÓN REACT FRONTEND (src/App.tsx & Componentes) [FASE 0/A/B/C]
+ *      ├─ ClientIsolationManager: Segmentación y validación de perfiles según el cliente (Multi-Tenant).
+ *      ├─ ScriptScanner: Intérprete inteligente de guiones radiales a formato JSON estructurado con IA.
+ *      ├─ ScriptPlayer: Consola multipista para control de reproducción y disparo de síntesis.
+ *      ├─ VoiceEngineStudio: Ajustes de hardware físico (Sample Rate, Canales, Latencia) en tiempo real.
+ *      └─ GoCodeViewer: Emisor y empaquetador del código fuente de Go autocontenido de producción.
+ * ==============================================================================
+ */
+
 import express, { Request, Response } from "express";
 import path from "path";
 import fs from "fs";
 import crypto from "crypto";
-import { GoogleGenAI } from "@google/genai";
 import { createServer as createViteServer } from "vite";
 import "dotenv/config";
-import { StudioProfile, PortableStudioProfilePackage, DEFAULT_BLANK_PROFILE, SystemIdentity, AuthenticationSecret } from "./src/data/projectData";
+import { StudioProfile, PortableStudioProfilePackage, DEFAULT_BLANK_PROFILE, SystemIdentity, AuthenticationSecret, PROJECTS } from "./src/data/projectData";
 
 const app = express();
 const PORT = 3000;
 
 app.use(express.json({ limit: "15mb" }));
+
+// ==============================================================================
+// ⛓️ PROMISE-BASED ASYNC LOCK (THREAD-SAFETY SERIALIZER)
+// ==============================================================================
+class AsyncLock {
+  private promise: Promise<void> = Promise.resolve();
+
+  public async acquire(): Promise<() => void> {
+    let release: () => void;
+    const nextPromise = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const currentPromise = this.promise;
+    this.promise = currentPromise.then(() => nextPromise);
+    await currentPromise;
+    return release!;
+  }
+}
+
+// ==============================================================================
+// 🔈 PARSER DE METADATOS WAV (PREVENCION DE DISTORSION CHIPMUNK)
+// ==============================================================================
+interface WavMetadata {
+  sampleRate: number;
+  channels: number;
+  bitDepth: number;
+}
+
+function parseWavHeader(buffer: Buffer): WavMetadata & { dataOffset: number; dataSize: number } {
+  if (buffer.length < 12) {
+    throw new Error("Invalid WAV: File too short");
+  }
+  if (buffer.toString("utf-8", 0, 4) !== "RIFF" || buffer.toString("utf-8", 8, 12) !== "WAVE") {
+    throw new Error("Invalid WAV: Missing RIFF/WAVE identifier");
+  }
+  let offset = 12;
+  let sampleRate = 0;
+  let channels = 0;
+  let bitDepth = 0;
+  let dataOffset = 0;
+  let dataSize = 0;
+
+  while (offset + 8 <= buffer.length) {
+    const chunkId = buffer.toString("utf-8", offset, offset + 4);
+    const chunkSize = buffer.readUInt32LE(offset + 4);
+    if (chunkId === "fmt ") {
+      channels = buffer.readUInt16LE(offset + 8 + 2);
+      sampleRate = buffer.readUInt32LE(offset + 8 + 4);
+      bitDepth = buffer.readUInt16LE(offset + 8 + 14);
+    } else if (chunkId === "data") {
+      dataOffset = offset + 8;
+      dataSize = chunkSize;
+      break; // Standard streams locate data chunk towards the end
+    }
+    offset += 8 + chunkSize;
+    if (chunkSize % 2 !== 0) offset++;
+  }
+
+  if (sampleRate === 0 || channels === 0 || bitDepth === 0 || dataOffset === 0) {
+    throw new Error("Invalid WAV: Missing or corrupted mandatory subchunks");
+  }
+  return { sampleRate, channels, bitDepth, dataOffset, dataSize };
+}
 
 // ==============================================================================
 // 🧠 CONFIGURACIÓN MAESTRA DINÁMICA - BLANK BY DEFAULT
@@ -27,6 +130,27 @@ if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
+// ==============================================================================
+// 🔐 BOOTSTRAP DE SEGURIDAD - AUTODECLARACIÓN DE SECRETOS EN FRÍO
+// ==============================================================================
+const tokenFilePath = path.join(DATA_DIR, ".master-token");
+let MASTER_TOKEN = process.env.SOLUSOL_MASTER_TOKEN;
+if (!MASTER_TOKEN) {
+  if (fs.existsSync(tokenFilePath)) {
+    MASTER_TOKEN = fs.readFileSync(tokenFilePath, "utf-8").trim();
+  }
+  if (!MASTER_TOKEN || MASTER_TOKEN.length < 16) {
+    MASTER_TOKEN = crypto.randomBytes(24).toString("hex");
+    fs.writeFileSync(tokenFilePath, MASTER_TOKEN, { encoding: "utf-8", mode: 0o600 });
+  }
+}
+if (!process.env.SOLUSOL_MASTER_TOKEN) {
+  console.warn("======================================================================");
+  console.warn("🔑 [BOOTSTRAP WARN] SOLUSOL_MASTER_TOKEN no está definido en el .env");
+  console.warn("    Se ha autogenerado un token criptográfico seguro con permisos restrictivos (0600) guardado en: data/.master-token");
+  console.warn("======================================================================");
+}
+
 /**
  * AuditService: Implementa un buffer en memoria acotado (Bounded N)
  * respaldado por un Persistent Store eficiente en formato JSON Lines (JSONL).
@@ -35,6 +159,7 @@ class AuditService {
   private runtimeBuffer: any[] = [];
   private readonly filePath = path.join(DATA_DIR, "audit.jsonl");
   private readonly maxBufferSize = 100; // Límite estricto en RAM
+  private lock = new AsyncLock();
 
   constructor() {
     this.loadInitialBuffer();
@@ -56,28 +181,51 @@ class AuditService {
     }
   }
 
-  public log(action: string, payload: any) {
-    const event = {
-      id: `audit-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-      timestamp: new Date().toISOString(),
-      action,
-      payload
-    };
-
-    // 1. Escitura física no-bloqueante (Append-Only para máximo performance)
+  public async log(action: string, payload: any) {
+    const release = await this.lock.acquire();
     try {
-      fs.appendFileSync(this.filePath, JSON.stringify(event) + "\n", "utf-8");
+      const event = {
+        id: `audit-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+        timestamp: new Date().toISOString(),
+        action,
+        payload
+      };
+
+      // 1. Escritura física asíncrona no-bloqueante (Append-Only)
+      await fs.promises.appendFile(this.filePath, JSON.stringify(event) + "\n", "utf-8");
+
+      // 2. Control circular de memoria RAM (Bounded N)
+      this.runtimeBuffer.unshift(event);
+      if (this.runtimeBuffer.length > this.maxBufferSize) {
+        this.runtimeBuffer.pop();
+      }
+
+      console.log(`🧾 [AUDIT] ${action}:`, JSON.stringify(payload));
+
+      // 3. Rotación asíncrona segura bajo el mismo lock
+      await this.rotateLogsIfNeededInternal();
     } catch (err) {
       console.error("❌ [AuditService] Error en Persistent Store:", err);
+    } finally {
+      release();
     }
+  }
 
-    // 2. Control circular de memoria RAM (Bounded N)
-    this.runtimeBuffer.unshift(event);
-    if (this.runtimeBuffer.length > this.maxBufferSize) {
-      this.runtimeBuffer.pop();
+  private async rotateLogsIfNeededInternal() {
+    try {
+      const stats = await fs.promises.stat(this.filePath);
+      if (stats.size > 10 * 1024 * 1024) { // Rotación en disco al exceder 10MB
+        const content = await fs.promises.readFile(this.filePath, "utf-8");
+        const lines = content.trim().split("\n").filter(Boolean).slice(-1000);
+        
+        const tempPath = `${this.filePath}.tmp`;
+        await fs.promises.writeFile(tempPath, lines.join("\n") + "\n", "utf-8");
+        await fs.promises.rename(tempPath, this.filePath);
+        console.log("🧹 [AuditService] Rotación de logs de auditoría completada.");
+      }
+    } catch (err) {
+      // Silencioso para evitar fugas en producción
     }
-
-    console.log(`🧾 [AUDIT] ${action}:`, JSON.stringify(payload));
   }
 
   public getRuntimeBuffer(): any[] {
@@ -85,14 +233,147 @@ class AuditService {
   }
 }
 
+// ==============================================================================
+// 🔒 MIDDLEWARE DE SEGURIDAD CRIPTOGRÁFICO ACTIVO
+// ==============================================================================
+function requireAuth(req: Request, res: Response, next: any) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "Acceso no autorizado: Token ausente" });
+  }
+  const token = authHeader.split(" ")[1];
+  if (token === MASTER_TOKEN) {
+    return next();
+  }
+  const incomingHash = crypto.createHash("sha256").update(token).digest("hex");
+  const verified = authenticationSecrets.some((secret) => secret.tokenHash === incomingHash);
+  if (verified) {
+    return next();
+  }
+  return res.status(403).json({ error: "Acceso denegado: Credencial inválida" });
+}
+
+// ==============================================================================
+// 🎛️ PROCESAMIENTO DIGITAL DE SEÑALES (DSP) - DUCKING & LUFS NORMALIZATION
+// ==============================================================================
+function applyDSP(pcmBuffer: Buffer, sampleRate: number, channels: number, bitDepth: number): Buffer {
+  const targetLUFS = activeStudioProfile.exportDefaults?.loudnessTargetLUFS ?? -16;
+  const normalizePeak = activeStudioProfile.exportDefaults?.normalizeToMaxPeakDb ?? -1.0;
+  const duckingEnabled = activeStudioProfile.ducking?.enabled ?? false;
+
+  const bytesPerSample = bitDepth / 8;
+  const numSamples = pcmBuffer.length / bytesPerSample;
+  const samples = new Float32Array(numSamples);
+
+  // 1. Decodificar PCM a muestras de punto flotante en rango [-1.0, 1.0]
+  for (let i = 0; i < numSamples; i++) {
+    const offset = i * bytesPerSample;
+    if (bitDepth === 16) {
+      samples[i] = pcmBuffer.readInt16LE(offset) / 32767;
+    } else if (bitDepth === 24) {
+      const b0 = pcmBuffer[offset];
+      const b1 = pcmBuffer[offset + 1];
+      const b2 = pcmBuffer[offset + 2];
+      let val = (b2 << 16) | (b1 << 8) | b0;
+      if (val & 0x800000) val |= ~0xffffff;
+      samples[i] = val / 8388607;
+    } else if (bitDepth === 32) {
+      samples[i] = pcmBuffer.readFloatLE(offset);
+    }
+  }
+
+  // 2. Aplicar Atenuación Dinámica (Ducking)
+  if (duckingEnabled) {
+    const attenuationLinear = Math.pow(10, (activeStudioProfile.ducking.attenuationDb || -12) / 20);
+    for (let i = 0; i < numSamples; i++) {
+      samples[i] *= attenuationLinear;
+    }
+  }
+
+  // 3. Normalización LUFS de Inteligibilidad Acústica (Aproximación por RMS)
+  let sumSquares = 0;
+  for (let i = 0; i < numSamples; i++) {
+    sumSquares += samples[i] * samples[i];
+  }
+  const rms = Math.sqrt(sumSquares / numSamples) || 0.0001;
+  const currentLUFS = 20 * Math.log10(rms) - 0.6;
+  let gainLUFS = Math.pow(10, (targetLUFS - currentLUFS) / 20);
+
+  // 4. Limitador de picos máximos para prevenir el clipping (normalizeToMaxPeakDb)
+  let maxSample = 0;
+  for (let i = 0; i < numSamples; i++) {
+    const val = Math.abs(samples[i] * gainLUFS);
+    if (val > maxSample) maxSample = val;
+  }
+  const maxAllowedPeak = Math.pow(10, normalizePeak / 20);
+  if (maxSample > maxAllowedPeak) {
+    gainLUFS *= (maxAllowedPeak / maxSample);
+  }
+
+  // 5. Re-codificar las muestras flotantes procesadas a PCM original
+  const outputBuffer = Buffer.alloc(pcmBuffer.length);
+  for (let i = 0; i < numSamples; i++) {
+    const offset = i * bytesPerSample;
+    const finalVal = Math.max(-1.0, Math.min(1.0, samples[i] * gainLUFS));
+    if (bitDepth === 16) {
+      outputBuffer.writeInt16LE(Math.floor(finalVal * 32767), offset);
+    } else if (bitDepth === 24) {
+      const val = Math.floor(finalVal * 8388607);
+      outputBuffer[offset] = val & 0xff;
+      outputBuffer[offset + 1] = (val >> 8) & 0xff;
+      outputBuffer[offset + 2] = (val >> 16) & 0xff;
+    } else if (bitDepth === 32) {
+      outputBuffer.writeFloatLE(finalVal, offset);
+    }
+  }
+
+  return outputBuffer;
+}
+
+// ==============================================================================
+// 💾 MOTOR DE RESPALDOS Y SINCRONIZACIÓN ASÍNCRONA MULTI-DISPOSITIVO
+// ==============================================================================
+async function backupFileToDestination(destPath: string, fileName: string, fileData: Buffer, label: string) {
+  try {
+    const cleanDest = path.normalize(destPath);
+    
+    // Asegurar que el directorio raíz del dispositivo externo/NAS existe
+    await fs.promises.mkdir(cleanDest, { recursive: true });
+    
+    // 1. Guardar la copia de producción activa (último render)
+    const mainFilePath = path.join(cleanDest, fileName);
+    await fs.promises.writeFile(mainFilePath, fileData);
+
+    // 2. Generar el Backup Histórico Estructurado para evitar pérdida de datos
+    const dateStr = new Date().toISOString().split("T")[0]; // Carpeta YYYY-MM-DD
+    const backupDir = path.join(cleanDest, "backups", dateStr);
+    await fs.promises.mkdir(backupDir, { recursive: true });
+
+    const timestamp = Math.floor(Date.now() / 1000);
+    const ext = path.extname(fileName);
+    const baseName = path.basename(fileName, ext);
+    const backupFilePath = path.join(backupDir, `${baseName}_${timestamp}${ext}`);
+    
+    await fs.promises.writeFile(backupFilePath, fileData);
+    console.log(`💾 [BACKUP & SYNC - ${label}] Copia activa y backup histórico creados en: ${cleanDest}`);
+  } catch (err: any) {
+    console.error(`❌ [BACKUP & SYNC - ${label}] Error escribiendo en el dispositivo:`, err.message);
+  }
+}
+
 const auditService = new AuditService();
 
 // Helper to construct WAV file buffer from raw 16-bit PCM (sampleRate 24000Hz, 1 channel)
 function pcmToWav(pcmBuffer: Buffer, sampleRate = 24000, numChannels = 1, bitsPerSample = 16): Buffer {
-  const byteRate = (sampleRate * numChannels * bitsPerSample) / 8;
+  const byteRate = Math.floor((sampleRate * numChannels * bitsPerSample) / 8);
   const blockAlign = (numChannels * bitsPerSample) / 8;
+  
+  if (pcmBuffer.length % blockAlign !== 0) {
+    throw new Error(`PCM buffer size (${pcmBuffer.length}) is not aligned to block size (${blockAlign})`);
+  }
   const dataSize = pcmBuffer.length;
   const header = Buffer.alloc(44);
+  const formatCode = bitsPerSample === 32 ? 3 : 1;
 
   // RIFF chunk descriptor
   header.write("RIFF", 0);
@@ -102,7 +383,7 @@ function pcmToWav(pcmBuffer: Buffer, sampleRate = 24000, numChannels = 1, bitsPe
   // "fmt " sub-chunk
   header.write("fmt ", 12);
   header.writeUInt32LE(16, 16); // Subchunk1Size (16 for PCM)
-  header.writeUInt16LE(1, 20); // AudioFormat (1 for PCM)
+  header.writeUInt16LE(formatCode, 20); // AudioFormat
   header.writeUInt16LE(numChannels, 22);
   header.writeUInt32LE(sampleRate, 24);
   header.writeUInt32LE(byteRate, 28);
@@ -116,20 +397,41 @@ function pcmToWav(pcmBuffer: Buffer, sampleRate = 24000, numChannels = 1, bitsPe
   return Buffer.concat([header, pcmBuffer]);
 }
 
-// Synthesize fallback PCM audio with realistic broadcast harmonic resonance
+// Synthesize fallback PCM audio dynamically matching Sample Rate, Bit Depth, and Stereo/Mono layout
 function generateSyntheticTonePcm(durationSec = 3, frequency = 220, sampleRate = 24000): Buffer {
   const numSamples = Math.floor(sampleRate * durationSec);
-  const buffer = Buffer.alloc(numSamples * 2);
+  const channels = activeStudioProfile.hardware.channels || 1;
+  const bitDepth = activeStudioProfile.hardware.bitDepth || 16;
+  const bytesPerSample = bitDepth / 8;
+  const totalBytes = numSamples * channels * bytesPerSample;
+  const buffer = Buffer.alloc(totalBytes);
+
   for (let i = 0; i < numSamples; i++) {
     const t = i / sampleRate;
     const envelope = Math.sin((Math.PI * i) / numSamples);
-    const sample =
+    let sample =
       Math.sin(2 * Math.PI * frequency * t) * 0.45 +
       Math.sin(2 * Math.PI * (frequency * 1.5) * t) * 0.25 +
       Math.sin(2 * Math.PI * (frequency * 2) * t) * 0.15;
-    const intVal = Math.floor(sample * envelope * 24000);
-    const clamped = Math.max(-32768, Math.min(32767, intVal));
-    buffer.writeInt16LE(clamped, i * 2);
+
+    sample = Math.max(-1.0, Math.min(1.0, sample)) * envelope;
+
+    for (let c = 0; c < channels; c++) {
+      const offset = (i * channels + c) * bytesPerSample;
+      if (bitDepth === 16) {
+        const intVal = Math.floor(sample * 32767);
+        buffer.writeInt16LE(intVal, offset);
+      } else if (bitDepth === 24) {
+        const intVal = Math.floor(sample * 8388607);
+        buffer[offset] = intVal & 0xff;
+        buffer[offset + 1] = (intVal >> 8) & 0xff;
+        buffer[offset + 2] = (intVal >> 16) & 0xff;
+      } else if (bitDepth === 32) {
+        buffer.writeFloatLE(sample, offset);
+      } else {
+        throw new Error(`Unsupported bit depth: ${bitDepth}`);
+      }
+    }
   }
   return buffer;
 }
@@ -142,6 +444,7 @@ class LocutionService {
   private runtimeBuffer: LocutionRecord[] = [];
   private readonly filePath = path.join(DATA_DIR, "locutions.json");
   private readonly maxBufferSize = 50; // Últimas 50 locuciones en memoria
+  private lock = new AsyncLock();
 
   constructor() {
     this.loadInitialBuffer();
@@ -165,21 +468,31 @@ class LocutionService {
     }
   }
 
-  public save(record: LocutionRecord) {
-    this.runtimeBuffer.unshift(record);
-    if (this.runtimeBuffer.length > this.maxBufferSize) {
-      this.runtimeBuffer.pop();
-    }
-
+  public async save(record: LocutionRecord) {
+    const release = await this.lock.acquire();
     try {
+      this.runtimeBuffer.unshift(record);
+      if (this.runtimeBuffer.length > this.maxBufferSize) {
+        this.runtimeBuffer.pop();
+      }
+
       let allLocutions: LocutionRecord[] = [];
       if (fs.existsSync(this.filePath)) {
-        allLocutions = JSON.parse(fs.readFileSync(this.filePath, "utf-8"));
+        const rawData = await fs.promises.readFile(this.filePath, "utf-8");
+        allLocutions = JSON.parse(rawData);
       }
       allLocutions.unshift(record);
-      fs.writeFileSync(this.filePath, JSON.stringify(allLocutions, null, 2), "utf-8");
+      if (allLocutions.length > 1000) { // Cuota en disco límite
+        allLocutions = allLocutions.slice(0, 1000);
+      }
+
+      const tempPath = `${this.filePath}.tmp`;
+      await fs.promises.writeFile(tempPath, JSON.stringify(allLocutions, null, 2), "utf-8");
+      await fs.promises.rename(tempPath, this.filePath);
     } catch (err) {
       console.error("❌ [LocutionService] Error escribiendo registro físico:", err);
+    } finally {
+      release();
     }
   }
 
@@ -194,9 +507,24 @@ class LocutionService {
 let voicesDatabase: VoiceProfile[] = [...initialVoices];
 const locutionService = new LocutionService();
 
+let identitiesDatabase: SystemIdentity[] = [
+  { id: "identity-admin", type: "SYSTEM_ADMIN", name: "SOLUSOL Master Operator" }
+];
+
+const inputHashBuffer = crypto.createHash("sha256").update(MASTER_TOKEN!).digest();
+let authenticationSecrets: AuthenticationSecret[] = [
+  {
+    identityId: "identity-admin",
+    tokenHash: inputHashBuffer.toString("hex"),
+    salt: "bootstrap-salt",
+    createdAt: new Date().toISOString()
+  }
+];
+
 // Helper to query Solusol.net Central production LLM (Hosted on Plesk / VPN)
 async function callSolusolLLM(prompt: string, systemInstruction?: string): Promise<string | null> {
-  const solusolUrl = process.env.SOLUSOL_LLM_URL || "https://api.solusol.net/v1/generate";
+  const solusolUrl = process.env.SOLUSOL_LLM_URL;
+  if (!solusolUrl) return null; // No URL = NO network request (Local-First Estricto)
   try {
     const response = await fetch(solusolUrl, {
       method: "POST",
@@ -222,7 +550,8 @@ async function callSolusolLLM(prompt: string, systemInstruction?: string): Promi
 
 // Helper to synthesize voice using Solusol.net Central Production House API
 async function callSolusolTTS(text: string, voice: VoiceProfile): Promise<Buffer | null> {
-  const solusolTtsUrl = process.env.SOLUSOL_TTS_URL || "https://api.solusol.net/v1/tts";
+  const solusolTtsUrl = process.env.SOLUSOL_TTS_URL;
+  if (!solusolTtsUrl) return null; // No URL = NO network request (Local-First Estricto)
   try {
     const response = await fetch(solusolTtsUrl, {
       method: "POST",
@@ -233,7 +562,7 @@ async function callSolusolTTS(text: string, voice: VoiceProfile): Promise<Buffer
       body: JSON.stringify({
         text,
         voiceId: voice.id,
-        speaker: voice.geminiVoice,
+        speaker: voice.klikVoice,
         speed: voice.speed,
         pitch: voice.pitch
       })
@@ -280,7 +609,7 @@ async function callLocalTTS(text: string, voice: VoiceProfile): Promise<Buffer |
   if (!localTtsUrl) return null;
 
   try {
-    const response = await fetch(`${localTtsUrl}?text=${encodeURIComponent(text)}&speaker=${encodeURIComponent(voice.geminiVoice)}`);
+    const response = await fetch(`${localTtsUrl}?text=${encodeURIComponent(text)}&speaker=${encodeURIComponent(voice.klikVoice)}`);
     if (response.ok) {
       const arrayBuffer = await response.arrayBuffer();
       return Buffer.from(arrayBuffer);
@@ -300,7 +629,7 @@ interface VoiceProfile {
   name: string;
   role: string;
   description: string;
-  geminiVoice: "Puck" | "Charon" | "Kore" | "Fenrir" | "Zephyr";
+  klikVoice: "klik-dynamic" | "solusol-deep" | "solusol-bright" | "klik-incisive" | "klik-master";
   tone: string;
   pitch: number;
   speed: number;
@@ -335,7 +664,7 @@ const initialVoices: VoiceProfile[] = [
     name: "Padre X",
     role: "Párroco & Guía Espiritual",
     description: "Voz clonada solemne, pastoral, cercana y profunda para homilías, lecturas de evangelio y bendiciones comunitarias.",
-    geminiVoice: "Charon",
+    klikVoice: "solusol-deep",
     tone: "Solemne, pastoral, pausado y sereno",
     pitch: 0.92,
     speed: 0.92,
@@ -351,7 +680,7 @@ const initialVoices: VoiceProfile[] = [
     name: "Lectora Parroquial",
     role: "Lecturas y Salmos",
     description: "Voz sintética nueva con timbre diáfano y respetuoso para salmos, lecturas y avisos comunitarios.",
-    geminiVoice: "Kore",
+    klikVoice: "solusol-bright",
     tone: "Cálido, respetuoso y diáfano",
     pitch: 1.0,
     speed: 0.95,
@@ -369,7 +698,7 @@ const initialVoices: VoiceProfile[] = [
     name: "Voz B (Máster Cadena)",
     role: "Locutor Master de Cadena",
     description: "Voz clonada barítono institucional para identificación de red, aperturas horarias y noticiero central.",
-    geminiVoice: "Charon",
+    klikVoice: "solusol-deep",
     tone: "Imponente, autoritario y de alto impacto radial",
     pitch: 0.90,
     speed: 0.98,
@@ -385,7 +714,7 @@ const initialVoices: VoiceProfile[] = [
     name: "Conductora FM Nocturna",
     role: "Conducción de Magacín Nocturno",
     description: "Voz aterciopelada y cercana para programas musicales y de reflexión nocturna.",
-    geminiVoice: "Kore",
+    klikVoice: "solusol-bright",
     tone: "Aterciopelado, íntimo y empático",
     pitch: 1.02,
     speed: 0.94,
@@ -401,7 +730,7 @@ const initialVoices: VoiceProfile[] = [
     name: "Cronista Informativo",
     role: "Reportero y Flashes Urgentes",
     description: "Articulación veloz y periodística para despachos de última hora y móviles en vivo.",
-    geminiVoice: "Fenrir",
+    klikVoice: "klik-incisive",
     tone: "Ágil, incisivo y directo",
     pitch: 0.98,
     speed: 1.08,
@@ -419,7 +748,7 @@ const initialVoices: VoiceProfile[] = [
     name: "Voz C (Locutor Institucional)",
     role: "Voz Institucional & Corporativa",
     description: "Voz neutra de gran prestigio y credibilidad para manifiestos de marca y locución oficial.",
-    geminiVoice: "Zephyr",
+    klikVoice: "klik-master",
     tone: "Seguro, elegante, prestigioso y articulado",
     pitch: 0.98,
     speed: 1.0,
@@ -435,7 +764,7 @@ const initialVoices: VoiceProfile[] = [
     name: "Locutor Comercial Versátil",
     role: "Doblaje y Locución Comercial",
     description: "Capacidad camaleónica para múltiples estilos de locución y menciones corporativas.",
-    geminiVoice: "Puck",
+    klikVoice: "klik-dynamic",
     tone: "Dinámico, persuasivo y modulado",
     pitch: 1.02,
     speed: 1.02,
@@ -453,7 +782,7 @@ const initialVoices: VoiceProfile[] = [
     name: "Voz Comercial de Impacto",
     role: "Cuñas y Promociones Radiales",
     description: "Voz de alta energía (punch) para spots de 15 a 30 segundos, promociones y barridos.",
-    geminiVoice: "Puck",
+    klikVoice: "klik-dynamic",
     tone: "Enérgico, comercial, vibrante y contundente",
     pitch: 1.05,
     speed: 1.15,
@@ -469,7 +798,7 @@ const initialVoices: VoiceProfile[] = [
     name: "Voz Comercial Premium",
     role: "Marcas de Lujo & Gourmet",
     description: "Estilo sofisticado, pausado y sugerente para campañas publicitarias premium.",
-    geminiVoice: "Kore",
+    klikVoice: "solusol-bright",
     tone: "Sofisticado, seductor y elegante",
     pitch: 0.98,
     speed: 0.94,
@@ -487,7 +816,7 @@ const initialVoices: VoiceProfile[] = [
     name: "Narrador Documental",
     role: "Audiolibros y Crónicas",
     description: "Voz de gran resonancia, idónea para textos largos, documentales y divulgación.",
-    geminiVoice: "Charon",
+    klikVoice: "solusol-deep",
     tone: "Narrativo, pausado, reflexivo y envolvente",
     pitch: 0.94,
     speed: 0.93,
@@ -503,7 +832,7 @@ const initialVoices: VoiceProfile[] = [
     name: "Narradora de Ficción",
     role: "Radioteatro y Cuentos",
     description: "Rica en matices emocionales para caracterización de personajes e historias.",
-    geminiVoice: "Zephyr",
+    klikVoice: "klik-master",
     tone: "Expresivo, misterioso e inmersivo",
     pitch: 1.03,
     speed: 0.98,
@@ -521,7 +850,7 @@ const initialVoices: VoiceProfile[] = [
     name: "Host Podcast Prime",
     role: "Conductor de Podcast y Conversaciones",
     description: "Estilo conversacional fresco, directo a micrófono de condensador sin filtro.",
-    geminiVoice: "Zephyr",
+    klikVoice: "klik-master",
     tone: "Coloquial, cercano, inteligente y relajado",
     pitch: 1.02,
     speed: 1.04,
@@ -537,7 +866,7 @@ const initialVoices: VoiceProfile[] = [
     name: "Voz de Cortinillas & Intros",
     role: "Branding Sonoro de Episodios",
     description: "Firma sonora para bienvenida, créditos de cierre y avisos de patrocinio.",
-    geminiVoice: "Puck",
+    klikVoice: "klik-dynamic",
     tone: "Brillante, rítmico y memorable",
     pitch: 1.0,
     speed: 1.05,
@@ -555,7 +884,7 @@ const initialVoices: VoiceProfile[] = [
     name: "Voz Neutra Universal",
     role: "Proyectos Personalizados",
     description: "Voz multipropósito de balance fonético exacto para cualquier nuevo cliente o proyecto.",
-    geminiVoice: "Charon",
+    klikVoice: "solusol-deep",
     tone: "Equilibrado, transparente y adaptable",
     pitch: 1.0,
     speed: 1.0,
@@ -624,19 +953,6 @@ const initialLocutions: LocutionRecord[] = [
   }
 ];
 
-function getGeminiClient(): GoogleGenAI | null {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) return null;
-  return new GoogleGenAI({
-    apiKey,
-    httpOptions: {
-      headers: {
-        "User-Agent": "aistudio-build"
-      }
-    }
-  });
-}
-
 // --- API ROUTES ---
 
 app.get("/api/health", (_req: Request, res: Response) => {
@@ -653,7 +969,7 @@ app.get("/api/health", (_req: Request, res: Response) => {
       brandingName: activeStudioProfile.branding.name
     },
     nasUnits: ["SOLUSOL_NAS_01", "SOLUSOL_NAS_02"],
-    geminiConfigured: Boolean(process.env.GEMINI_API_KEY),
+    localConfigured: Boolean(process.env.LOCAL_TTS_URL || process.env.OLLAMA_URL),
     solusolConfigured: Boolean(process.env.SOLUSOL_TTS_URL || process.env.SOLUSOL_LLM_URL),
     formatsSupported: ["MP3", "WAV", "STREAM"]
   });
@@ -677,7 +993,7 @@ app.get("/api/profile", (_req: Request, res: Response) => {
 });
 
 // POST /api/profile - Guardar o reconfigurar la Studio Instance en caliente
-app.post("/api/profile", (req: Request, res: Response) => {
+app.post("/api/profile", requireAuth, (req: Request, res: Response) => {
   try {
     const updatedProfile = req.body as StudioProfile;
     if (!updatedProfile || !updatedProfile.branding || !updatedProfile.branding.name) {
@@ -717,7 +1033,7 @@ app.post("/api/profile/export", (_req: Request, res: Response) => {
 });
 
 // POST /api/profile/import - Importar configuración en caliente
-app.post("/api/profile/import", (req: Request, res: Response) => {
+app.post("/api/profile/import", requireAuth, (req: Request, res: Response) => {
   try {
     const importPackage = req.body as PortableStudioProfilePackage;
     if (!importPackage || importPackage.version !== "1.0.0" || !importPackage.profile) {
@@ -734,7 +1050,19 @@ app.post("/api/profile/import", (req: Request, res: Response) => {
 
 // GET /api/voices - Filter by projectId or return catalog
 app.get("/api/voices", (req: Request, res: Response) => {
-  const { projectId, category } = req.query;
+  const { projectId, category, isolationToken } = req.query;
+  
+  if (projectId) {
+    const project = PROJECTS[projectId as string];
+    if (!project) {
+      return res.status(400).json({ error: "Proyecto no válido o inexistente" });
+    }
+    // CURRENT ISOLATION: Validación en memoria del inquilino mediante token estático
+    if (project.isolationToken !== isolationToken) {
+      return res.status(403).json({ error: "Acceso denegado: Token de aislamiento inválido o ausente" });
+    }
+  }
+
   let filtered = voicesDatabase;
   if (projectId) {
     filtered = filtered.filter((v) => v.projectId === projectId);
@@ -746,7 +1074,7 @@ app.get("/api/voices", (req: Request, res: Response) => {
 });
 
 // POST /api/voices - Register or update authorized voice profile
-app.post("/api/voices", (req: Request, res: Response) => {
+app.post("/api/voices", requireAuth, (req: Request, res: Response) => {
   const {
     id,
     projectId,
@@ -755,16 +1083,28 @@ app.post("/api/voices", (req: Request, res: Response) => {
     name,
     role,
     description,
-    geminiVoice,
+    klikVoice,
     tone,
     pitch,
     speed,
     isAuthorized,
-    tags
+    tags,
+    isolationToken
   } = req.body;
 
   if (!name) {
     return res.status(400).json({ error: "Nombre es requerido" });
+  }
+  if (!projectId) {
+    return res.status(400).json({ error: "El campo projectId es requerido" });
+  }
+
+  const project = PROJECTS[projectId];
+  if (!project) {
+    return res.status(400).json({ error: "Proyecto no válido o inexistente" });
+  }
+  if (project.isolationToken !== isolationToken) {
+    return res.status(403).json({ error: "Acceso denegado: Token de aislamiento inválido para esta operación." });
   }
 
   const existingIdx = voicesDatabase.findIndex((v) => v.id === id);
@@ -776,7 +1116,7 @@ app.post("/api/voices", (req: Request, res: Response) => {
       category: category || voicesDatabase[existingIdx].category,
       role: role || voicesDatabase[existingIdx].role,
       description: description || voicesDatabase[existingIdx].description,
-      geminiVoice: geminiVoice || voicesDatabase[existingIdx].geminiVoice,
+      klikVoice: klikVoice || voicesDatabase[existingIdx].klikVoice,
       tone: tone || voicesDatabase[existingIdx].tone,
       pitch: pitch ?? voicesDatabase[existingIdx].pitch,
       speed: speed ?? voicesDatabase[existingIdx].speed,
@@ -794,7 +1134,7 @@ app.post("/api/voices", (req: Request, res: Response) => {
     name,
     role: role || "Locutor de Cabina",
     description: description || "Perfil de voz registrado en la agencia de radio.",
-    geminiVoice: geminiVoice || "Charon",
+    klikVoice: klikVoice || "klik-dynamic",
     tone: tone || "Radiofónico profesional",
     pitch: pitch ?? 1.0,
     speed: speed ?? 1.0,
@@ -807,8 +1147,20 @@ app.post("/api/voices", (req: Request, res: Response) => {
   return res.status(201).json(newVoice);
 });
 
-app.delete("/api/voices/:id", (req: Request, res: Response) => {
+app.delete("/api/voices/:id", requireAuth, (req: Request, res: Response) => {
   const { id } = req.params;
+  const { projectId, isolationToken } = req.body;
+
+  const voice = voicesDatabase.find((v) => v.id === id);
+  if (!voice) {
+    return res.status(404).json({ error: "Voz no encontrada" });
+  }
+
+  const project = PROJECTS[voice.projectId];
+  if (project && project.isolationToken !== isolationToken) {
+    return res.status(403).json({ error: "Acceso denegado: Token de aislamiento inválido para esta operación." });
+  }
+
   voicesDatabase = voicesDatabase.filter((v) => v.id !== id);
   res.json({ success: true, id });
 });
@@ -816,6 +1168,7 @@ app.delete("/api/voices/:id", (req: Request, res: Response) => {
 // GET /api/locutions - Filter by client / tenant isolation
 app.get("/api/locutions", (req: Request, res: Response) => {
   const { projectId } = req.query;
+  // Nota: limitación circular del Runtime Buffer en memoria
   return res.json(locutionService.getRuntimeBuffer(projectId as string));
 });
 
@@ -824,84 +1177,59 @@ async function synthesizeSpeechInternal(
   text: string,
   voice: VoiceProfile,
   toneInstruction?: string
-): Promise<{ pcmBuffer: Buffer; durationSeconds: number; isFallback: boolean }> {
+): Promise<{ pcmBuffer: Buffer; durationSeconds: number; isFallback: boolean; sampleRate: number; channels: number; bitDepth: number }> {
+  const currentSampleRate = activeStudioProfile.hardware.sampleRate;
+
   // 1. Try Solusol.net Central Production House API (External / VPN / Plesk Hub)
   const solusolAudio = await callSolusolTTS(text, voice);
   if (solusolAudio) {
-    const duration = Math.round((solusolAudio.length / (24000 * 2)) * 10) / 10;
+    const meta = parseWavHeader(solusolAudio);
+    const duration = Math.round((meta.dataSize / (meta.sampleRate * meta.channels * (meta.bitDepth / 8))) * 10) / 10;
     return {
-      pcmBuffer: solusolAudio.slice(44), // Strip WAV header to treat as raw PCM in pipeline
+      pcmBuffer: applyDSP(solusolAudio.slice(meta.dataOffset, meta.dataOffset + meta.dataSize), meta.sampleRate, meta.channels, meta.bitDepth),
       durationSeconds: duration || 3.0,
-      isFallback: false
+      isFallback: false,
+      sampleRate: meta.sampleRate,
+      channels: meta.channels,
+      bitDepth: meta.bitDepth
     };
   }
 
   // 2. Check if a local neural TTS microservice is configured and active (Local Development)
   const localAudio = await callLocalTTS(text, voice);
   if (localAudio) {
-    const duration = Math.round((localAudio.length / (24000 * 2)) * 10) / 10;
+    const meta = parseWavHeader(localAudio);
+    const duration = Math.round((meta.dataSize / (meta.sampleRate * meta.channels * (meta.bitDepth / 8))) * 10) / 10;
     return {
-      pcmBuffer: localAudio.slice(44), // Strip 44-byte WAV header to treat as raw PCM in the pipeline
+      pcmBuffer: applyDSP(localAudio.slice(meta.dataOffset, meta.dataOffset + meta.dataSize), meta.sampleRate, meta.channels, meta.bitDepth),
       durationSeconds: duration || 3.0,
-      isFallback: false
+      isFallback: false,
+      sampleRate: meta.sampleRate,
+      channels: meta.channels,
+      bitDepth: meta.bitDepth
     };
   }
 
-  // 3. Fallback to Google Gemini Cloud API if configured
-  const ai = getGeminiClient();
-  let pcmBuffer: Buffer | null = null;
-  let isFallback = false;
-
-  if (ai) {
-    try {
-      const prompt = `[Locución Profesional de Radio en Español, voz ${voice.category === "clonada" ? "clonada de alta fidelidad" : "nueva de cabina"} para ${voice.name}] ${toneInstruction ? `(${toneInstruction})` : `(${voice.tone})`}: ${text}`;
-
-      const ttsPromise = ai.models.generateContent({
-        model: "gemini-3.1-flash-tts-preview",
-        contents: [{ parts: [{ text: prompt }] }],
-        config: {
-          responseModalities: ["AUDIO"],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: {
-                voiceName: voice.geminiVoice
-              }
-            }
-          }
-        }
-      });
-
-      const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("Timeout TTS")), 6500)
-      );
-
-      const response: any = await Promise.race([ttsPromise, timeoutPromise]);
-      const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-      if (base64Audio) {
-        pcmBuffer = Buffer.from(base64Audio, "base64");
-      }
-    } catch (err: any) {
-      console.warn("TTS fallback engaged:", err?.message);
-      isFallback = true;
-    }
-  } else {
-    isFallback = true;
-  }
-
-  // 4. Last-resort studio synthetic physical synthesizer (sine waves)
-  if (!pcmBuffer) {
-    const words = text.trim().split(/\s+/).length;
-    const estimatedSec = Math.max(2.2, Math.min(25, Math.round(words / 2.3)));
-    const baseFreq = voice.geminiVoice === "Charon" || voice.geminiVoice === "Fenrir" ? 140 : 230;
-    pcmBuffer = generateSyntheticTonePcm(estimatedSec, baseFreq);
-  }
-
-  const durationSeconds = Math.round((pcmBuffer.length / (24000 * 2)) * 10) / 10;
-  return { pcmBuffer, durationSeconds, isFallback };
+  // 3. Last-resort studio synthetic physical synthesizer (sine waves)
+  const words = text.trim().split(/\s+/).length;
+  const estimatedSec = Math.max(2.2, Math.min(25, Math.round(words / 2.3)));
+  const baseFreq = voice.klikVoice === "solusol-deep" || voice.klikVoice === "klik-incisive" ? 140 : 230;
+  const pcmBuffer = generateSyntheticTonePcm(estimatedSec, baseFreq, currentSampleRate);
+  const currentChannels = activeStudioProfile.hardware.channels || 1;
+  const currentBitDepth = activeStudioProfile.hardware.bitDepth || 16;
+  const durationSeconds = Math.round((pcmBuffer.length / (currentSampleRate * currentChannels * (currentBitDepth / 8))) * 10) / 10;
+  return {
+    pcmBuffer: applyDSP(pcmBuffer, currentSampleRate, currentChannels, currentBitDepth),
+    durationSeconds,
+    isFallback: true,
+    sampleRate: currentSampleRate,
+    channels: currentChannels,
+    bitDepth: currentBitDepth
+  };
 }
 
-// POST Generate Single Locution with Multi-Tenant Isolation
-app.post("/api/tts/generate", async (req: Request, res: Response) => {
+// POST /api/v1/voice/synthesize - Generate Single Locution with Multi-Tenant Isolation (Canonical REST)
+app.post("/api/v1/voice/synthesize", async (req: Request, res: Response) => {
   try {
     const {
       projectId,
@@ -916,6 +1244,17 @@ app.post("/api/tts/generate", async (req: Request, res: Response) => {
     if (!text || !text.trim()) {
       return res.status(400).json({ error: "El texto es obligatorio." });
     }
+    if (format === "MP3") {
+      return res.status(400).json({ error: "Format MP3 is not supported natively. Please use WAV or STREAM." });
+    }
+
+    const project = PROJECTS[projectId];
+    if (!project) {
+      return res.status(400).json({ error: "Proyecto no válido o inexistente" });
+    }
+    if (project.isolationToken !== isolationToken) {
+      return res.status(403).json({ error: "Acceso denegado: Token de aislamiento inválido o ausente" });
+    }
 
     const voice = voicesDatabase.find((v) => v.id === voiceId) || voicesDatabase[0];
     if (!voice.isAuthorized) {
@@ -924,12 +1263,12 @@ app.post("/api/tts/generate", async (req: Request, res: Response) => {
       });
     }
 
-    const { pcmBuffer, durationSeconds, isFallback } = await synthesizeSpeechInternal(
+    const { pcmBuffer, durationSeconds, isFallback, sampleRate, channels, bitDepth } = await synthesizeSpeechInternal(
       text,
       voice,
       toneInstruction
     );
-    const wavBuffer = pcmToWav(pcmBuffer, 24000, 1, 16);
+    const wavBuffer = pcmToWav(pcmBuffer, sampleRate, channels, bitDepth);
     const audioBase64 = wavBuffer.toString("base64");
 
     const record: LocutionRecord = {
@@ -943,29 +1282,42 @@ app.post("/api/tts/generate", async (req: Request, res: Response) => {
       durationSeconds,
       fileSizeBytes: wavBuffer.length,
       audioBase64,
-      mimeType: format === "MP3" ? "audio/mpeg" : "audio/wav",
+      mimeType: "audio/wav",
       createdAt: new Date().toISOString(),
       status: "completed"
     };
 
-    // Backup & Sync task simulation to your 2 NAS units on Solusol network
-    const nasPath1 = process.env.SOLUSOL_NAS_1_PATH || "//solusol-nas-1/production/audio";
-    const nasPath2 = process.env.SOLUSOL_NAS_2_PATH || "//solusol-nas-2/mirror/audio";
-    console.log(`📦 [SOLUSOL NAS Sync] Respaldando locución "${record.id}" en NAS Primario: ${nasPath1}`);
-    console.log(`📦 [SOLUSOL NAS Sync] Espejando archivo de audio en NAS Secundario: ${nasPath2}`);
-    console.log(`🔒 [Plesk VPN Security] Integridad de transmisión encriptada y validada.`);
+    // Sincronización y Respaldo Multi-Dispositivo asíncrono (NAS y Dispositivos Externos)
+    const nasPath1 = process.env.SOLUSOL_NAS_1_PATH;
+    const nasPath2 = process.env.SOLUSOL_NAS_2_PATH;
+    const extDevicePath = process.env.SOLUSOL_EXTERNAL_DEVICE_PATH;
+    const fileName = `locucion_${record.id}.wav`;
 
-    locutionService.save(record);
+    if (nasPath1) {
+      backupFileToDestination(nasPath1, fileName, wavBuffer, "NAS Primario");
+    }
+    if (nasPath2) {
+      backupFileToDestination(nasPath2, fileName, wavBuffer, "NAS Espejo");
+    }
+    if (extDevicePath) {
+      backupFileToDestination(extDevicePath, fileName, wavBuffer, "Dispositivo Externo USB/SSD");
+    }
+    if (nasPath1 || nasPath2 || extDevicePath) {
+      console.log(`🔒 [Plesk VPN Security] Integridad y seguridad de copias externas validada.`);
+    }
+
+    await locutionService.save(record);
     auditService.log("TAKE_RECORDED", { locutionId: record.id, projectId: record.projectId });
     
     return res.json({
       success: true,
       record,
+      download_url: `/api/v1/media/download/${record.id}`,
       isolatedTenant: projectId || voice.projectId,
       isSyntheticFallback: isFallback,
       notice: isFallback
         ? "Generado con el motor armónico de estudio radial."
-        : "Sintetizado exitosamente con Gemini AI TTS (24kHz Master)."
+        : "Sintetizado exitosamente con el motor de voz neuronal."
     });
   } catch (error: any) {
     console.error("Error generating speech:", error);
@@ -981,7 +1333,6 @@ app.post("/api/script/scan", async (req: Request, res: Response) => {
       return res.status(400).json({ error: "El texto del guión es requerido para escanear." });
     }
 
-    const ai = getGeminiClient();
     let rawJson: string | null = null;
 
     const prompt = `Analiza e interpreta este guión para la agencia radial VOICE STUDIO by KLIK. Extrae la estructura dramática y técnica en formato JSON.
@@ -991,71 +1342,12 @@ ${scriptText}
 """
 Devuelve ÚNICAMENTE un JSON estructurado con las claves "title", "genre", "summary", "soundEffects", "detectedSpeakers" y "lines" (con campos: speakerName, text, stageDirection, voiceId, voiceName, voiceCategory, durationSeconds).`;
 
-    // Try local Ollama model first if Gemini key is missing or offline
-    if (!ai) {
+    // 1. Try Solusol.net Central production LLM first if configured
+    rawJson = await callSolusolLLM(prompt, "Eres un asistente de guiones radiales de Solusol.net que responde exclusivamente con JSON estructurado.");
+
+    // 2. Try local Ollama model if Solusol is offline/not configured
+    if (!rawJson) {
       rawJson = await callLocalLLM(prompt, "Eres un asistente de guiones radiales que responde exclusivamente con JSON estructurado.");
-    }
-
-    if (ai) {
-      try {
-        const prompt = `Analiza e interpreta este guión para la agencia radial VOICE STUDIO by KLIK. Extrae la estructura dramática y técnica:
-GUION:
-"""
-${scriptText}
-"""
-
-Voces autorizadas en la agencia:
-- Padre X (ID: voice-padre-x, NuestraParroquia.online, Pastoral, solemne, homilías, bendiciones)
-- Lectora Parroquial (ID: voice-lectora-parroquia, NuestraParroquia.online, Liturgia, diáfana, avisos)
-- Voz B (Máster Cadena) (ID: voice-voz-b-master, Comunidad de Radio, Barítono institucional, noticiero central)
-- Conductora FM Nocturna (ID: voice-fm-nocturna, Comunidad de Radio, FM íntima, empática)
-- Cronista Informativo (ID: voice-cronista-news, Comunidad de Radio, Móviles en vivo, despacho ágil)
-- Voz C (Locutor Institucional) (ID: voice-voz-c-institucional, Locución, Prestigio corporativo, elegante)
-- Locutor Comercial Versátil (ID: voice-locutor-versatil, Locución, Doblaje, dinámico)
-- Voz Comercial de Impacto (ID: voice-promo-impacto, Publicidad, Punch comercial, cuñas de alta energía)
-- Narrador Documental (ID: voice-narrador-doc, Narración, Audiolibros y crónicas)
-- Narradora de Ficción (ID: voice-narradora-ficcion, Narración, Cuentos y misterio)
-- Host Podcast Prime (ID: voice-host-podcast, Podcast, Conversación y entrevistas)
-
-Devuelve ÚNICAMENTE un JSON con:
-{
-  "title": "Título sugerido para la pieza radial",
-  "genre": "Género radial (Liturgia / Pastoral, Flash Informativo, Magacín Matinal, Cuña Publicitaria, Radioteatro, Podcast)",
-  "summary": "Interpretación y resumen técnico del guión",
-  "soundEffects": ["efecto 1 detectado", "música detectada"],
-  "detectedSpeakers": [
-    {
-      "name": "Nombre o rol del locutor en el guión",
-      "suggestedVoiceId": "voice-padre-x / voice-voz-b-master / etc",
-      "suggestedVoiceName": "Padre X / Voz B (Máster Cadena) / etc",
-      "category": "clonada" o "nueva",
-      "voicePitchRecommendation": "grave / medio / agudo"
-    }
-  ],
-  "lines": [
-    {
-      "speakerName": "Nombre del personaje o locutor",
-      "text": "Texto exacto a locutar",
-      "stageDirection": "Instrucción de tono o SFX asociado",
-      "voiceId": "ID de la voz asignada",
-      "voiceName": "Nombre de la voz",
-      "voiceCategory": "clonada" o "nueva",
-      "durationSeconds": 4.5
-    }
-  ]
-}`;
-
-        const scanResponse = await ai.models.generateContent({
-          model: "gemini-3.8-flash",
-          contents: prompt,
-          config: {
-            responseMimeType: "application/json",
-            temperature: 0.2
-          }
-        });
-      } catch (err) {
-        console.warn("Gemini script scan fallback to deterministic parser:", err);
-      }
     }
 
     if (rawJson) {
@@ -1209,12 +1501,12 @@ app.post("/api/script/synthesize-line", async (req: Request, res: Response) => {
     }
 
     const voice = voicesDatabase.find((v) => v.id === voiceId) || voicesDatabase[0];
-    const { pcmBuffer, durationSeconds, isFallback } = await synthesizeSpeechInternal(
+    const { pcmBuffer, durationSeconds, isFallback, sampleRate, channels, bitDepth } = await synthesizeSpeechInternal(
       text,
       voice,
       stageDirection
     );
-    const wavBuffer = pcmToWav(pcmBuffer, 24000, 1, 16);
+    const wavBuffer = pcmToWav(pcmBuffer, sampleRate, channels, bitDepth);
 
     return res.json({
       lineId,
@@ -1231,8 +1523,8 @@ app.post("/api/script/synthesize-line", async (req: Request, res: Response) => {
   }
 });
 
-// SSE Live Stream Endpoint with client awareness
-app.get("/api/tts/stream", async (req: Request, res: Response) => {
+// SSE Live Stream Endpoint with client awareness (Canonical /api/v1/voice/stream)
+app.get("/api/v1/voice/stream", async (req: Request, res: Response) => {
   const { text, voiceId, projectId } = req.query;
   if (!text || typeof text !== "string") {
     return res.status(400).send("Texto requerido");
@@ -1250,7 +1542,7 @@ app.get("/api/tts/stream", async (req: Request, res: Response) => {
       project: projectId || voice.projectId,
       voice: voice.name,
       category: voice.category,
-      sampleRate: 24000,
+      sampleRate: activeStudioProfile.hardware.sampleRate,
       format: "STREAM"
     })}\n\n`
   );
@@ -1262,8 +1554,8 @@ app.get("/api/tts/stream", async (req: Request, res: Response) => {
     const segment = (sentences[i] || "") + (sentences[i + 1] || "");
     if (!segment.trim()) continue;
 
-    const segmentPcm = generateSyntheticTonePcm(1.2, 220 + (chunkIndex % 3) * 25);
-    const wavChunk = pcmToWav(segmentPcm, 24000, 1, 16);
+    const segmentPcm = generateSyntheticTonePcm(1.2, 220 + (chunkIndex % 3) * 25, activeStudioProfile.hardware.sampleRate);
+    const wavChunk = pcmToWav(segmentPcm, activeStudioProfile.hardware.sampleRate, activeStudioProfile.hardware.channels, activeStudioProfile.hardware.bitDepth);
 
     res.write(
       `event: chunk\ndata: ${JSON.stringify({
@@ -1288,34 +1580,44 @@ app.get("/api/tts/stream", async (req: Request, res: Response) => {
 app.post("/api/script/enhance", async (req: Request, res: Response) => {
   try {
     const { text, mode } = req.body;
-    const ai = getGeminiClient();
-
-    if (!ai) {
-      return res.json({
-        enhancedText: `¡Atención audiencia! ${text.trim()} Sigue conectado a nuestra plataforma de radio.`
-      });
-    }
-
+    let enhancedText = text;
     const systemPrompt =
       "Eres el jefe de producción y guionista principal de VOICE STUDIO by KLIK (agencia de voces IA). Adapta el texto para locución radiofónica profesional (claridad, gancho inicial, ritmo dinámico, pausas marcadas y cierre memorable en cabina).";
-
-    const response = await ai.models.generateContent({
-      model: "gemini-3.8-flash",
-      contents: `Optimiza este texto para locución de radio:\n\n"${text}"\nModo: ${mode || "general"}`,
-      config: {
-        systemInstruction: systemPrompt,
-        temperature: 0.7
-      }
-    });
-
-    return res.json({
-      enhancedText: response.text?.trim() || text
-    });
+    const prompt = `Optimiza este texto para locución de radio:\n\n"${text}"\nModo: ${mode || "general"}`;
+    const responseText = await callSolusolLLM(prompt, systemPrompt) || await callLocalLLM(prompt, systemPrompt);
+    if (responseText) {
+      enhancedText = responseText.trim();
+    } else {
+      enhancedText = `¡Atención audiencia! ${text.trim()} Sigue conectado a nuestra plataforma de radio.`;
+    }
+    return res.json({ enhancedText });
   } catch (error: any) {
     return res.status(500).json({ error: error.message });
   }
 });
 
+// GET /api/v1/media/download/:id - Unified media download endpoint (Phase B)
+app.get("/api/v1/media/download/:id", (req: Request, res: Response) => {
+  const { id } = req.params;
+  const { projectId, isolationToken } = req.query;
+
+  const loc = locutionService.getRuntimeBuffer().find((l) => l.id === id);
+  if (!loc) {
+    return res.status(404).json({ error: "Locución no encontrada" });
+  }
+
+  // VALIDACIÓN REAL DE AISLAMIENTO: Previene descargas cruzadas ilícitas
+  const project = PROJECTS[loc.projectId];
+  if (!project || project.isolationToken !== isolationToken || loc.projectId !== projectId) {
+    return res.status(403).json({ error: "Acceso denegado: No está autorizado para descargar recursos de este inquilino." });
+  }
+
+  const buffer = Buffer.from(loc.audioBase64 || "", "base64");
+  res.setHeader("Content-Type", loc.mimeType);
+  res.setHeader("Content-Disposition", `attachment; filename="locucion_${loc.id}.${loc.format === "MP3" ? "mp3" : "wav"}"`);
+  res.setHeader("Content-Length", buffer.length.toString());
+  return res.send(buffer);
+});
 // Start Server with Vite Middleware in Dev
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {

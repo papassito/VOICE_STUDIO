@@ -32,13 +32,13 @@ func (h *APIHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/voices", h.handleCreateVoice)
 	mux.HandleFunc("PUT /api/v1/voices/{id}/authorize", h.handleToggleAuthorize)
 
-	// Voice Engine: TransformaciÃ³n Texto -> Audio
+	// Voice Engine: Transformación Texto -> Audio
 	mux.HandleFunc("POST /api/v1/voice-engine/generate", h.handleGenerate)
 	mux.HandleFunc("GET /api/v1/voice-engine/stream", h.handleStream)
 
 	// Historial y Descargas
 	mux.HandleFunc("GET /api/v1/locutions", h.handleListLocutions)
-	mux.HandleFunc("GET /api/v1/locutions/{id}/download", h.handleDownloadAudio)
+	mux.HandleFunc("GET /api/v1/media/download/{id}", h.handleDownloadAudio)
 }
 
 func (h *APIHandler) handleListProjects(w http.ResponseWriter, r *http.Request) {
@@ -54,11 +54,46 @@ func (h *APIHandler) handleListProjects(w http.ResponseWriter, r *http.Request) 
 			ID:          models.ProjectComunidadRadio,
 			Name:        "Comunidad de Radio",
 			Domain:      "comunidadradio.live",
-			Description: "Espacio de locutores y transmisiÃ³n radial",
+			Description: "Espacio de locutores y transmisión radial",
 			Active:      true,
 		},
 	}
 	writeJSON(w, http.StatusOK, projects)
+}
+
+func (h *APIHandler) handleGetStudioProfile(w http.ResponseWriter, r *http.Request) {
+	profile := map[string]interface{}{
+		"id": "blank-instance-uuid",
+		"type": "CUSTOM",
+		"branding": map[string]string{
+			"name": "Estudio sin Configurar",
+		},
+	}
+	writeJSON(w, http.StatusOK, profile)
+}
+
+func (h *APIHandler) handleListNodes(w http.ResponseWriter, r *http.Request) {
+	nodes := []map[string]interface{}{
+		{
+			"id": "go-native-node",
+			"name": "Go Native DSP Render Node",
+			"type": "RENDER_NODE",
+			"status": "active",
+		},
+	}
+	writeJSON(w, http.StatusOK, nodes)
+}
+
+func (h *APIHandler) handleListAuditLogs(w http.ResponseWriter, r *http.Request) {
+	logs := []map[string]interface{}{
+		{
+			"id": "audit-go-init",
+			"timestamp": time.Now().Format(time.RFC3339),
+			"action": "GO_ENGINE_STARTED",
+			"payload": map[string]string{"status": "ok"},
+		},
+	}
+	writeJSON(w, http.StatusOK, logs)
 }
 
 func (h *APIHandler) handleListVoices(w http.ResponseWriter, r *http.Request) {
@@ -70,7 +105,7 @@ func (h *APIHandler) handleListVoices(w http.ResponseWriter, r *http.Request) {
 func (h *APIHandler) handleCreateVoice(w http.ResponseWriter, r *http.Request) {
 	var voice models.VoiceProfile
 	if err := json.NewDecoder(r.Body).Decode(&voice); err != nil {
-		http.Error(w, "JSON invÃ¡lido", http.StatusBadRequest)
+		http.Error(w, "JSON inválido", http.StatusBadRequest)
 		return
 	}
 
@@ -109,12 +144,16 @@ func (h *APIHandler) handleToggleAuthorize(w http.ResponseWriter, r *http.Reques
 func (h *APIHandler) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	var req models.SynthesisRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "JSON invÃ¡lido", http.StatusBadRequest)
+		http.Error(w, "JSON inválido", http.StatusBadRequest)
 		return
 	}
 
 	if req.Text == "" || req.VoiceID == "" {
 		http.Error(w, "text y voice_id son requeridos", http.StatusBadRequest)
+		return
+	}
+	if req.Format == models.FormatMP3 {
+		http.Error(w, "Format MP3 is not supported natively. Please use WAV or STREAM.", http.StatusBadRequest)
 		return
 	}
 
@@ -130,7 +169,7 @@ func (h *APIHandler) handleGenerate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Ejecutar sÃ­ntesis en el Voice Engine
+	// Ejecutar síntesis en el Voice Engine
 	audioBytes, duration, err := h.engine.Synthesize(r.Context(), voice, req.Text, req.Format)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Error en Voice Engine: %v", err), http.StatusInternalServerError)
@@ -138,9 +177,6 @@ func (h *APIHandler) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	mimeType := "audio/wav"
-	if req.Format == models.FormatMP3 {
-		mimeType = "audio/mpeg"
-	}
 
 	locution := &models.LocutionRecord{
 		ID:              fmt.Sprintf("loc-%d", time.Now().UnixNano()),
@@ -165,7 +201,7 @@ func (h *APIHandler) handleGenerate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleStream provee transmisiÃ³n continua en vivo (STREAM)
+	// handleStream provee transmisión continua en vivo (STREAM)
 func (h *APIHandler) handleStream(w http.ResponseWriter, r *http.Request) {
 	voiceID := r.URL.Query().Get("voice_id")
 	text := r.URL.Query().Get("text")
@@ -177,7 +213,7 @@ func (h *APIHandler) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.engine.StreamBroadcast(r.Context(), voice, text, w); err != nil {
-		// En streaming el error suele ser por desconexiÃ³n del cliente
+		// En streaming el error suele ser por desconexión del cliente
 		return
 	}
 }
@@ -192,7 +228,7 @@ func (h *APIHandler) handleDownloadAudio(w http.ResponseWriter, r *http.Request)
 	id := r.PathValue("id")
 	locution, err := h.store.GetLocution(id)
 	if err != nil {
-		http.Error(w, "LocuciÃ³n no encontrada", http.StatusNotFound)
+		http.Error(w, "Locución no encontrada", http.StatusNotFound)
 		return
 	}
 

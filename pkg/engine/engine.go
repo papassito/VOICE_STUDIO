@@ -8,6 +8,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"os/exec"
 	"sync"
 	"time"
 
@@ -26,36 +27,33 @@ type StudioProfileConfig struct {
 	ActiveBrandingName string `json:"brandingName"`
 }
 
-// VoiceEngine define la interfaz central para la transformaciÃ³n de Texto a Audio
+// VoiceEngine define la interfaz central para la transformación de Texto a Audio
 type VoiceEngine interface {
 	Synthesize(ctx context.Context, voice *models.VoiceProfile, text string, format models.AudioFormat) ([]byte, float64, error)
 	StreamBroadcast(ctx context.Context, voice *models.VoiceProfile, text string, w http.ResponseWriter) error
 	Close() error
 }
 
-// GeminiVoiceEngine implementa VoiceEngine usando la API de IA de Google Gemini
-type GeminiVoiceEngine struct {
-	apiKey        string
+// StudioVoiceEngine implementa VoiceEngine para procesamiento de audio local y de producción de Solusol
+type StudioVoiceEngine struct {
 	mu            sync.RWMutex
 	activeProfile StudioProfileConfig
 }
 
-// NewGeminiVoiceEngine crea una nueva instancia del motor de voz
-func NewGeminiVoiceEngine(ctx context.Context, apiKey string) (*GeminiVoiceEngine, error) {
+// NewStudioVoiceEngine crea una nueva instancia del motor de voz
+func NewStudioVoiceEngine(ctx context.Context) (*StudioVoiceEngine, error) {
 	// Instancia compatible con la plataforma de APIs SOLUSOL.NET SIC y KLIK Soft PRO
 	defaultProfile := StudioProfileConfig{}
 	defaultProfile.Hardware.SampleRate = 44100
 	defaultProfile.Hardware.BitDepth = 24
 	defaultProfile.Hardware.Channels = 1
-	return &GeminiVoiceEngine{
-		apiKey:        apiKey,
+	return &StudioVoiceEngine{
 		activeProfile: defaultProfile,
 	}, nil
 }
 
-// UpdateProfile actualiza en caliente los metadatos de hardware y comportamiento de renderizado.
-// Retorna true si los cambios físicos en los parámetros del hardware exigen reiniciar el pipeline de audio.
-func (e *GeminiVoiceEngine) UpdateProfile(profile StudioProfileConfig) bool {
+// UpdateProfile actualiza en caliente los metadatos de hardware y comportamiento de renderizado
+func (e *StudioVoiceEngine) UpdateProfile(profile StudioProfileConfig) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -66,46 +64,47 @@ func (e *GeminiVoiceEngine) UpdateProfile(profile StudioProfileConfig) bool {
 		requiresRestart = true
 	}
 
-	if requiresRestart {
-		log.Printf("[SOLUSOL SIC API] CAMBIO FÍSICO DETECTADO: El cambio a %dHz, %d-bit (canales: %d) requiere REINICIAR el pipeline de audio.",
-			profile.Hardware.SampleRate, profile.Hardware.BitDepth, profile.Hardware.Channels)
-	} else {
-		log.Printf("[SOLUSOL SIC API] Reconfiguración en caliente exitosa para branding '%s' (%s)",
-			profile.ActiveBrandingName, profile.StudioType)
-	}
-
+	log.Printf("[SOLUSOL SIC API] Reconfigurando canal de audio para '%s' (%s) a %dHz, %d-bit (canales: %d)", 
+		profile.ActiveBrandingName, profile.StudioType, profile.Hardware.SampleRate, profile.Hardware.BitDepth, profile.Hardware.Channels)
 	e.activeProfile = profile
 	return requiresRestart
 }
 
 // Synthesize convierte texto en audio en formato WAV, MP3 o STREAM
-func (e *GeminiVoiceEngine) Synthesize(ctx context.Context, voice *models.VoiceProfile, text string, format models.AudioFormat) ([]byte, float64, error) {
+func (e *StudioVoiceEngine) Synthesize(ctx context.Context, voice *models.VoiceProfile, text string, format models.AudioFormat) ([]byte, float64, error) {
 	if !voice.IsAuthorized {
-		return nil, 0, fmt.Errorf("la voz '%s' no cuenta con autorizaciÃ³n para generar locuciones", voice.Name)
+		return nil, 0, fmt.Errorf("la voz '%s' no cuenta con autorización para generar locuciones", voice.Name)
 	}
 
 	log.Printf("[KLIK Soft PRO API] Sintetizando para proyecto '%s' con voz '%s' (%s) en formato %s",
-		voice.ProjectID, voice.Name, voice.GeminiVoice, format)
+		voice.ProjectID, voice.Name, voice.KlikVoice, format)
 
-	// 1. Obtener audio crudo PCM 24kHz (mediante Gemini API o fallback armÃ³nico de estudio)
-	// Usando dinámicamente la configuración del perfil activo
 	e.mu.RLock()
 	targetSampleRate := e.activeProfile.Hardware.SampleRate
 	channels := e.activeProfile.Hardware.Channels
 	bitDepth := e.activeProfile.Hardware.BitDepth
 	e.mu.RUnlock()
 
-	pcmData, duration := e.generatePCM(voice, text, targetSampleRate)
+	if targetSampleRate <= 0 || channels <= 0 || bitDepth <= 0 {
+		return nil, 0, fmt.Errorf("configuraciones de hardware inválidas: sampleRate=%d channels=%d bitDepth=%d", targetSampleRate, channels, bitDepth)
+	}
 
-	// 2. Transcodificar segÃºn el formato requerido (WAV o MP3)
+	pcmData, duration, err := e.generatePCM(voice, text, targetSampleRate)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	// 2. Transcodificar según el formato requerido
 	switch format {
 	case models.FormatWAV:
 		wavBytes := EncodeWAV(pcmData, targetSampleRate, channels, bitDepth)
 		return wavBytes, duration, nil
 
 	case models.FormatMP3:
-		// Para MP3 en Go puro, encapsulamos en encabezado MP3 optimizado para streaming
-		mp3Bytes := EncodeMP3Frame(pcmData, targetSampleRate)
+		mp3Bytes, err := EncodeMP3Frame(pcmData, targetSampleRate, channels, bitDepth)
+		if err != nil {
+			return nil, 0, err
+		}
 		return mp3Bytes, duration, nil
 
 	case models.FormatSTREAM:
@@ -118,7 +117,7 @@ func (e *GeminiVoiceEngine) Synthesize(ctx context.Context, voice *models.VoiceP
 }
 
 // StreamBroadcast emite el audio en tiempo real mediante Server-Sent Events o Chunked Transfer
-func (e *GeminiVoiceEngine) StreamBroadcast(ctx context.Context, voice *models.VoiceProfile, text string, w http.ResponseWriter) error {
+func (e *StudioVoiceEngine) StreamBroadcast(ctx context.Context, voice *models.VoiceProfile, text string, w http.ResponseWriter) error {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		return fmt.Errorf("el cliente HTTP no soporta streaming")
@@ -129,26 +128,32 @@ func (e *GeminiVoiceEngine) StreamBroadcast(ctx context.Context, voice *models.V
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
-	// Emitir evento inicial de sincronizaciÃ³n
+	// Emitir evento inicial de sincronización
 	fmt.Fprintf(w, "event: init\ndata: {\"project\":\"%s\",\"voice\":\"%s\",\"status\":\"connected\"}\n\n",
 		voice.ProjectID, voice.Name)
 	flusher.Flush()
 
-	// Segmentar texto en bloques para transmisiÃ³n fluida
 	e.mu.RLock()
 	targetSampleRate := e.activeProfile.Hardware.SampleRate
-	channels := e.activeProfile.Hardware.Channels
 	bitDepth := e.activeProfile.Hardware.BitDepth
+	channels := e.activeProfile.Hardware.Channels
 	e.mu.RUnlock()
 
-	pcmData, _ := e.generatePCM(voice, text, targetSampleRate)
+	if targetSampleRate <= 0 || channels <= 0 || bitDepth <= 0 {
+		return fmt.Errorf("configuraciones de hardware inválidas: sampleRate=%d channels=%d bitDepth=%d", targetSampleRate, channels, bitDepth)
+	}
+
+	pcmData, _, err := e.generatePCM(voice, text, targetSampleRate)
+	if err != nil {
+		return err
+	}
 	chunkSize := targetSampleRate * (bitDepth / 8) * channels // ~1 segundo de audio por chunk
 
 	totalChunks := (len(pcmData) + chunkSize - 1) / chunkSize
 	for i := 0; i < totalChunks; i++ {
 		select {
 		case <-ctx.Done():
-			log.Println("[Voice Engine] TransmisiÃ³n cancelada por el cliente")
+			log.Println("[Voice Engine] Transmisión cancelada por el cliente")
 			return ctx.Err()
 		default:
 			start := i * chunkSize
@@ -161,8 +166,12 @@ func (e *GeminiVoiceEngine) StreamBroadcast(ctx context.Context, voice *models.V
 			fmt.Fprintf(w, "event: audio_chunk\ndata: {\"chunk_index\":%d,\"size_bytes\":%d}\n\n", i, len(chunkWav))
 			flusher.Flush()
 
-			// Emular cadencia de transmisiÃ³n radial
-			time.Sleep(500 * time.Millisecond)
+			// Emular cadencia de transmisión radial
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(500 * time.Millisecond):
+			}
 		}
 	}
 
@@ -171,18 +180,15 @@ func (e *GeminiVoiceEngine) StreamBroadcast(ctx context.Context, voice *models.V
 	return nil
 }
 
-// generatePCM produce el buffer de audio PCM de 16 bits little-endian a 24000Hz
-func (e *GeminiVoiceEngine) generatePCM(voice *models.VoiceProfile, text string, sampleRate int) ([]byte, float64) {
-	durationSec := math.Max(2.5, float64(len(text))/15.0)
+// generateFloatSamples produce muestras matemáticas de punto flotante en rango [-1.0, 1.0]
+func (e *StudioVoiceEngine) generateFloatSamples(voice *models.VoiceProfile, durationSec float64, sampleRate int) []float64 {
 	numSamples := int(float64(sampleRate) * durationSec)
+	samples := make([]float64, numSamples)
 
-	buf := new(bytes.Buffer)
-
-	// Frecuencia base segÃºn el perfil de voz (grave para Padre X y locutor central, agudo para lectoras)
 	baseFreq := 180.0
-	if voice.GeminiVoice == "Charon" || voice.GeminiVoice == "Fenrir" {
+	if voice.ID == "voice-padre-x" || voice.ID == "voice-voz-b-master" {
 		baseFreq = 140.0
-	} else if voice.GeminiVoice == "Kore" || voice.GeminiVoice == "Zephyr" {
+	} else if voice.ID == "voice-lectora-parroquia" || voice.ID == "voice-fm-nocturna" {
 		baseFreq = 240.0
 	}
 
@@ -193,18 +199,73 @@ func (e *GeminiVoiceEngine) generatePCM(voice *models.VoiceProfile, text string,
 			math.Sin(2*math.Pi*(baseFreq*1.5)*t)*0.25 +
 			math.Sin(2*math.Pi*(baseFreq*2.0)*t)*0.15) * env
 
-		val := int16(sample * 24000.0)
-		binary.Write(buf, binary.LittleEndian, val)
+		if sample > 1.0 {
+			sample = 1.0
+		} else if sample < -1.0 {
+			sample = -1.0
+		}
+		samples[i] = sample
 	}
 
-	return buf.Bytes(), durationSec
+	return samples
 }
 
-// EncodeWAV aÃ±ade el encabezado RIFF WAVE estÃ¡ndar de 44 bytes a los datos PCM
+// convertToTargetPCM convierte muestras de flotante a PCM de 16-bit o 24-bit mono/stereo
+func convertToTargetPCM(monoSamples []float64, channels, bitsPerSample int) ([]byte, error) {
+	buf := new(bytes.Buffer)
+	numChannels := channels
+	if numChannels < 1 {
+		numChannels = 1
+	}
+
+	for _, sample := range monoSamples {
+		for c := 0; c < numChannels; c++ {
+			if bitsPerSample == 16 {
+				val := int16(sample * 32767.0)
+				binary.Write(buf, binary.LittleEndian, val)
+			} else if bitsPerSample == 24 {
+				val := int32(sample * 8388607.0)
+				buf.WriteByte(byte(val & 0xFF))
+				buf.WriteByte(byte((val >> 8) & 0xFF))
+				buf.WriteByte(byte((val >> 16) & 0xFF))
+			} else if bitsPerSample == 32 {
+				val := math.Float32bits(float32(sample))
+				binary.Write(buf, binary.LittleEndian, val)
+			} else {
+				return nil, fmt.Errorf("unsupported bit depth: %d", bitsPerSample)
+			}
+		}
+	}
+	return buf.Bytes(), nil
+}
+
+// generatePCM produce el buffer de audio PCM de la profundidad de bits y canales adecuados
+func (e *StudioVoiceEngine) generatePCM(voice *models.VoiceProfile, text string, sampleRate int) ([]byte, float64, error) {
+	durationSec := math.Max(2.5, float64(len(text))/15.0)
+
+	e.mu.RLock()
+	channels := e.activeProfile.Hardware.Channels
+	bitDepth := e.activeProfile.Hardware.BitDepth
+	e.mu.RUnlock()
+
+	floatSamples := e.generateFloatSamples(voice, durationSec, sampleRate)
+	pcmBytes, err := convertToTargetPCM(floatSamples, channels, bitDepth)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return pcmBytes, durationSec, nil
+}
+
+// EncodeWAV añade el encabezado RIFF WAVE estándar de 44 bytes a los datos PCM
 func EncodeWAV(pcm []byte, sampleRate, channels, bitsPerSample int) []byte {
 	byteRate := (sampleRate * channels * bitsPerSample) / 8
 	blockAlign := (channels * bitsPerSample) / 8
 	dataSize := uint32(len(pcm))
+	formatCode := uint16(1) // 1 = PCM Integer
+	if bitsPerSample == 32 {
+		formatCode = 3 // 3 = IEEE Float
+	}
 
 	buf := new(bytes.Buffer)
 
@@ -216,7 +277,7 @@ func EncodeWAV(pcm []byte, sampleRate, channels, bitsPerSample int) []byte {
 	// 2. Sub-chunk "fmt "
 	buf.WriteString("fmt ")
 	binary.Write(buf, binary.LittleEndian, uint32(16)) // PCM subchunk size
-	binary.Write(buf, binary.LittleEndian, uint16(1))  // Audio format 1 = PCM
+	binary.Write(buf, binary.LittleEndian, formatCode)
 	binary.Write(buf, binary.LittleEndian, uint16(channels))
 	binary.Write(buf, binary.LittleEndian, uint32(sampleRate))
 	binary.Write(buf, binary.LittleEndian, uint32(byteRate))
@@ -231,18 +292,32 @@ func EncodeWAV(pcm []byte, sampleRate, channels, bitsPerSample int) []byte {
 	return buf.Bytes()
 }
 
-// EncodeMP3Frame genera un contenedor reproducible compatible con streaming MP3
-func EncodeMP3Frame(pcm []byte, sampleRate int) []byte {
-	// Para un microservicio Go de producciÃ³n, aquÃ­ se integra github.com/viert/go-lame
-	// o se invoca una tuberÃ­a FFmpeg de ultra-baja latencia.
-	// Como empaque estÃ¡ndar retornamos audio procesado con metadatos ID3v2.
-	header := []byte{
-		0x49, 0x44, 0x33, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // ID3v2 Tag
+// EncodeMP3Frame genera un contenedor MP3 real mediante transcodificación por tubería ffmpeg/lame
+func EncodeMP3Frame(pcm []byte, sampleRate, channels, bitsPerSample int) ([]byte, error) {
+	// Generar contenedor WAV temporal para alimentar al codificador de línea de comandos
+	wavBytes := EncodeWAV(pcm, sampleRate, channels, bitsPerSample)
+
+	// Intentar utilizar ffmpeg en PATH para conversión nativa de alta fidelidad
+	cmd := exec.Command("ffmpeg", "-i", "pipe:0", "-f", "mp3", "pipe:1")
+	cmd.Stdin = bytes.NewReader(wavBytes)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err == nil && out.Len() > 0 {
+		return out.Bytes(), nil
 	}
-	wav := EncodeWAV(pcm, sampleRate, 1, 16)
-	return append(header, wav...)
+
+	// Alternativa: intentar usar LAME si ffmpeg no está disponible
+	cmdLame := exec.Command("lame", "-r", "-s", fmt.Sprintf("%.1f", float64(sampleRate)/1000.0), "-", "-")
+	cmdLame.Stdin = bytes.NewReader(pcm)
+	var outLame bytes.Buffer
+	cmdLame.Stdout = &outLame
+	if err := cmdLame.Run(); err == nil && outLame.Len() > 0 {
+		return outLame.Bytes(), nil
+	}
+
+	return nil, fmt.Errorf("no se detectó ffmpeg ni lame en el PATH de producción para codificación MP3 real")
 }
 
-func (e *GeminiVoiceEngine) Close() error {
+func (e *StudioVoiceEngine) Close() error {
 	return nil
 }

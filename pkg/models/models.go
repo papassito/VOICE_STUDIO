@@ -21,10 +21,10 @@ type AudioFormat string
 const (
 	FormatMP3    AudioFormat = "MP3"    // Comprimido para podcast y web
 	FormatWAV    AudioFormat = "WAV"    // Calidad estudio 24kHz sin comprimir
-	FormatSTREAM AudioFormat = "STREAM" // TransmisiÃ³n en tiempo real (SSE / Chunked)
+	FormatSTREAM AudioFormat = "STREAM" // Transmisión en tiempo real (SSE / Chunked)
 )
 
-// Project define la configuraciÃ³n y lÃ­mites de cada tenant
+// Project define la configuración y límites de cada tenant
 type Project struct {
 	ID          ProjectID `json:"id"`
 	Name        string    `json:"name"`
@@ -33,21 +33,21 @@ type Project struct {
 	Active      bool      `json:"active"`
 }
 
-// VoiceProfile representa una voz autorizada dentro de un proyecto especÃ­fico
+// VoiceProfile representa una voz autorizada dentro de un proyecto específico
 type VoiceProfile struct {
 	ID           string    `json:"id"`
 	ProjectID    ProjectID `json:"project_id"`   // Aislamiento: pertenece solo a este proyecto
 	Name         string    `json:"name"`         // Ej: "Padre X", "Carlos Morales"
-	Role         string    `json:"role"`         // Ej: "PÃ¡rroco", "Locutor Central"
-	GeminiVoice  string    `json:"gemini_voice"` // Puck, Charon, Kore, Fenrir, Zephyr
-	Tone         string    `json:"tone"`         // Solemne, RadiofÃ³nico, CÃ¡lido, etc.
+	Role         string    `json:"role"`         // Ej: "Párroco", "Locutor Central"
+	KlikVoice    string    `json:"klik_voice"`   // solusol-deep, solusol-bright, klik-master...
+	Tone         string    `json:"tone"`         // Solemne, Radiofónico, Cálido, etc.
 	Pitch        float64   `json:"pitch"`        // 0.8 - 1.2
 	Speed        float64   `json:"speed"`        // 0.8 - 1.3
 	IsAuthorized bool      `json:"is_authorized"`// Solo voces autorizadas pueden generar audio
 	CreatedAt    time.Time `json:"created_at"`
 }
 
-// SynthesisRequest es la peticiÃ³n enviada al Voice Engine
+// SynthesisRequest es la petición enviada al Voice Engine
 type SynthesisRequest struct {
 	ProjectID       ProjectID   `json:"project_id"`
 	VoiceID         string      `json:"voice_id"`

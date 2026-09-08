@@ -35,26 +35,17 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// 1. Obtener clave de API para el motor de IA Gemini
-	apiKey := os.Getenv("GEMINI_API_KEY")
-	if apiKey == "" {
-		log.Println("⚠️  AVISO: GEMINI_API_KEY no detectada en entorno.")
-		log.Println("    El Voice Engine operará en modo de síntesis armónica local (Preview).")
-	}
-
 	// 2. Inicializar Almacenamiento Multi-Tenant Aislado
 	store := storage.NewMemoryStore()
 	log.Println("✅ Almacén de identidades y contenidos inicializado con éxito.")
 
 	// 3. Inicializar el Voice Engine (Motor de IA para Texto -> Audio)
-	voiceEngine, err := engine.NewGeminiVoiceEngine(ctx, apiKey)
-	voiceEngine, err := engine.NewStudioVoiceEngine(ctx, os.Getenv("SOLUSOL_API_KEY"))
+	voiceEngine, err := engine.NewStudioVoiceEngine(ctx)
 	if err != nil {
 		log.Fatalf("❌ Error crítico inicializando Voice Engine: %v", err)
 	}
 	defer voiceEngine.Close()
-	log.Println("✅ Voice Engine (Google Gemini TTS + Transcodificador) listo.")
-	log.Println("âœ… Voice Engine (SOLUSOL.NET Local-First Engine) listo.")
+	log.Println("✅ Voice Engine (SOLUSOL.NET Local-First Engine) listo.")
 
 	// 4. Configurar Enrutador y Handlers HTTP
 	apiHandler := handlers.NewAPIHandler(store, voiceEngine)
@@ -144,7 +135,7 @@ type VoiceProfile struct {
 	ProjectID    ProjectID \`json:"project_id"\`   // Aislamiento: pertenece solo a este proyecto
 	Name         string    \`json:"name"\`         // Ej: "Padre X", "Carlos Morales"
 	Role         string    \`json:"role"\`         // Ej: "Párroco", "Locutor Central"
-	GeminiVoice  string    \`json:"gemini_voice"\` // Puck, Charon, Kore, Fenrir, Zephyr
+	KlikVoice    string    \`json:"klik_voice"\`   // solusol-deep, solusol-bright, klik-master...
 	Tone         string    \`json:"tone"\`         // Solemne, Radiofónico, Cálido, etc.
 	Pitch        float64   \`json:"pitch"\`        // 0.8 - 1.2
 	Speed        float64   \`json:"speed"\`        // 0.8 - 1.3
@@ -194,6 +185,8 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"os/exec"
+	"sync"
 	"time"
 
 	"voicestudio/pkg/models"
@@ -218,29 +211,27 @@ type VoiceEngine interface {
 	Close() error
 }
 
-// GeminiVoiceEngine implementa VoiceEngine usando la API de IA de Google Gemini
-type GeminiVoiceEngine struct {
-	apiKey string
+// StudioVoiceEngine implementa VoiceEngine para procesamiento de audio local y de producción de Solusol
+type StudioVoiceEngine struct {
 	mu            sync.RWMutex
 	activeProfile StudioProfileConfig
 }
 
-// NewGeminiVoiceEngine crea una nueva instancia del motor de voz
-func NewGeminiVoiceEngine(ctx context.Context, apiKey string) (*GeminiVoiceEngine, error) {
+// NewStudioVoiceEngine crea una nueva instancia del motor de voz
+func NewStudioVoiceEngine(ctx context.Context) (*StudioVoiceEngine, error) {
 	// Instancia compatible con la plataforma de APIs SOLUSOL.NET SIC y KLIK Soft PRO
 	defaultProfile := StudioProfileConfig{}
 	defaultProfile.Hardware.SampleRate = 44100
 	defaultProfile.Hardware.BitDepth = 24
 	defaultProfile.Hardware.Channels = 1
-	return &GeminiVoiceEngine{
-		apiKey:        apiKey,
+	return &StudioVoiceEngine{
 		activeProfile: defaultProfile,
 	}, nil
 }
 
 // UpdateProfile actualiza en caliente los metadatos de hardware y comportamiento de renderizado.
 // Retorna true si los cambios físicos en los parámetros del hardware exigen reiniciar el pipeline de audio.
-func (e *GeminiVoiceEngine) UpdateProfile(profile StudioProfileConfig) bool {
+func (e *StudioVoiceEngine) UpdateProfile(profile StudioProfileConfig) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -264,13 +255,13 @@ func (e *GeminiVoiceEngine) UpdateProfile(profile StudioProfileConfig) bool {
 }
 
 // Synthesize convierte texto en audio en formato WAV, MP3 o STREAM
-func (e *GeminiVoiceEngine) Synthesize(ctx context.Context, voice *models.VoiceProfile, text string, format models.AudioFormat) ([]byte, float64, error) {
+func (e *StudioVoiceEngine) Synthesize(ctx context.Context, voice *models.VoiceProfile, text string, format models.AudioFormat) ([]byte, float64, error) {
 	if !voice.IsAuthorized {
 		return nil, 0, fmt.Errorf("la voz '%s' no cuenta con autorización para generar locuciones", voice.Name)
 	}
 
 	log.Printf("[Voice Engine] Sintetizando para proyecto '%s' con voz '%s' (%s) en formato %s",
-		voice.ProjectID, voice.Name, voice.GeminiVoice, format)
+		voice.ProjectID, voice.Name, voice.KlikVoice, format)
 
 	// 1. Obtener audio crudo PCM (mediante Gemini API o fallback armónico de estudio)
 	// Usando dinámicamente la configuración del perfil activo bajo un cerrojo de lectura
@@ -280,7 +271,14 @@ func (e *GeminiVoiceEngine) Synthesize(ctx context.Context, voice *models.VoiceP
 	bitDepth := e.activeProfile.Hardware.BitDepth
 	e.mu.RUnlock()
 
-	pcmData, duration := e.generatePCM(voice, text, targetSampleRate)
+	if targetSampleRate <= 0 || channels <= 0 || bitDepth <= 0 {
+		return nil, 0, fmt.Errorf("invalid hardware configuration parameters")
+	}
+
+	pcmData, duration, err := e.generatePCM(voice, text, targetSampleRate)
+	if err != nil {
+		return nil, 0, err
+	}
 
 	// 2. Transcodificar según el formato requerido (WAV o MP3)
 	switch format {
@@ -289,7 +287,10 @@ func (e *GeminiVoiceEngine) Synthesize(ctx context.Context, voice *models.VoiceP
 		return wavBytes, duration, nil
 
 	case models.FormatMP3:
-		mp3Bytes := EncodeMP3Frame(pcmData, targetSampleRate)
+		mp3Bytes, err := EncodeMP3Frame(pcmData, targetSampleRate, channels, bitDepth)
+		if err != nil {
+			return nil, 0, err
+		}
 		return mp3Bytes, duration, nil
 
 	case models.FormatSTREAM:
@@ -302,7 +303,7 @@ func (e *GeminiVoiceEngine) Synthesize(ctx context.Context, voice *models.VoiceP
 }
 
 // StreamBroadcast emite el audio en tiempo real mediante Server-Sent Events o Chunked Transfer
-func (e *GeminiVoiceEngine) StreamBroadcast(ctx context.Context, voice *models.VoiceProfile, text string, w http.ResponseWriter) error {
+func (e *StudioVoiceEngine) StreamBroadcast(ctx context.Context, voice *models.VoiceProfile, text string, w http.ResponseWriter) error {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		return fmt.Errorf("el cliente HTTP no soporta streaming")
@@ -325,7 +326,14 @@ func (e *GeminiVoiceEngine) StreamBroadcast(ctx context.Context, voice *models.V
 	bitDepth := e.activeProfile.Hardware.BitDepth
 	e.mu.RUnlock()
 
-	pcmData, _ := e.generatePCM(voice, text, targetSampleRate)
+	if targetSampleRate <= 0 || channels <= 0 || bitDepth <= 0 {
+		return fmt.Errorf("invalid hardware configuration parameters")
+	}
+
+	pcmData, _, err := e.generatePCM(voice, text, targetSampleRate)
+	if err != nil {
+		return err
+	}
 	chunkSize := targetSampleRate * (bitDepth / 8) * channels // ~1 segundo de audio por chunk
 
 	totalChunks := (len(pcmData) + chunkSize - 1) / chunkSize
@@ -346,7 +354,11 @@ func (e *GeminiVoiceEngine) StreamBroadcast(ctx context.Context, voice *models.V
 			flusher.Flush()
 
 			// Emular cadencia de transmisión radial
-			time.Sleep(500 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(500 * time.Millisecond):
+			}
 		}
 	}
 
@@ -356,7 +368,7 @@ func (e *GeminiVoiceEngine) StreamBroadcast(ctx context.Context, voice *models.V
 }
 
 // generatePCM produce el buffer de audio PCM de 16 bits little-endian a 24000Hz
-func (e *GeminiVoiceEngine) generatePCM(voice *models.VoiceProfile, text string, sampleRate int) ([]byte, float64) {
+func (e *StudioVoiceEngine) generatePCM(voice *models.VoiceProfile, text string, sampleRate int) ([]byte, float64, error) {
 	durationSec := math.Max(2.5, float64(len(text))/15.0)
 	numSamples := int(float64(sampleRate) * durationSec)
 
@@ -364,9 +376,9 @@ func (e *GeminiVoiceEngine) generatePCM(voice *models.VoiceProfile, text string,
 
 	// Frecuencia base según el perfil de voz (grave para Padre X y locutor central, agudo para lectoras)
 	baseFreq := 180.0
-	if voice.GeminiVoice == "Charon" || voice.GeminiVoice == "Fenrir" {
+	if voice.KlikVoice == "solusol-deep" || voice.KlikVoice == "klik-incisive" {
 		baseFreq = 140.0
-	} else if voice.GeminiVoice == "Kore" || voice.GeminiVoice == "Zephyr" {
+	} else if voice.KlikVoice == "solusol-bright" || voice.KlikVoice == "klik-master" {
 		baseFreq = 240.0
 	}
 
@@ -381,7 +393,7 @@ func (e *GeminiVoiceEngine) generatePCM(voice *models.VoiceProfile, text string,
 		binary.Write(buf, binary.LittleEndian, val)
 	}
 
-	return buf.Bytes(), durationSec
+	return buf.Bytes(), durationSec, nil
 }
 
 // EncodeWAV añade el encabezado RIFF WAVE estándar de 44 bytes a los datos PCM
@@ -389,6 +401,10 @@ func EncodeWAV(pcm []byte, sampleRate, channels, bitsPerSample int) []byte {
 	byteRate := (sampleRate * channels * bitsPerSample) / 8
 	blockAlign := (channels * bitsPerSample) / 8
 	dataSize := uint32(len(pcm))
+	formatCode := uint16(1) // 1 = PCM Integer
+	if bitsPerSample == 32 {
+		formatCode = 3 // 3 = IEEE Float
+	}
 
 	buf := new(bytes.Buffer)
 
@@ -400,7 +416,7 @@ func EncodeWAV(pcm []byte, sampleRate, channels, bitsPerSample int) []byte {
 	// 2. Sub-chunk "fmt "
 	buf.WriteString("fmt ")
 	binary.Write(buf, binary.LittleEndian, uint32(16)) // PCM subchunk size
-	binary.Write(buf, binary.LittleEndian, uint16(1))  // Audio format 1 = PCM
+	binary.Write(buf, binary.LittleEndian, formatCode)
 	binary.Write(buf, binary.LittleEndian, uint16(channels))
 	binary.Write(buf, binary.LittleEndian, uint32(sampleRate))
 	binary.Write(buf, binary.LittleEndian, uint32(byteRate))
@@ -415,16 +431,30 @@ func EncodeWAV(pcm []byte, sampleRate, channels, bitsPerSample int) []byte {
 	return buf.Bytes()
 }
 
-// EncodeMP3Frame genera un contenedor reproducible compatible con streaming MP3
-func EncodeMP3Frame(pcm []byte, sampleRate int) []byte {
-	// Para un microservicio Go de producción, aquí se integra github.com/viert/go-lame
-	// o se invoca una tubería FFmpeg de ultra-baja latencia.
-	// Como empaque estándar retornamos audio procesado con metadatos ID3v2.
-	header := []byte{
-		0x49, 0x44, 0x33, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // ID3v2 Tag
+// EncodeMP3Frame genera un contenedor MP3 real mediante transcodificación por tubería ffmpeg/lame
+func EncodeMP3Frame(pcm []byte, sampleRate, channels, bitsPerSample int) ([]byte, error) {
+	// Generar contenedor WAV temporal para alimentar al codificador de línea de comandos
+	wavBytes := EncodeWAV(pcm, sampleRate, channels, bitsPerSample)
+
+	// Intentar utilizar ffmpeg en PATH para conversión nativa de alta fidelidad
+	cmd := exec.Command("ffmpeg", "-i", "pipe:0", "-f", "mp3", "pipe:1")
+	cmd.Stdin = bytes.NewReader(wavBytes)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err == nil && out.Len() > 0 {
+		return out.Bytes(), nil
 	}
-	wav := EncodeWAV(pcm, sampleRate, 1, 16)
-	return append(header, wav...)
+
+	// Alternativa: intentar usar LAME si ffmpeg no está disponible
+	cmdLame := exec.Command("lame", "-r", "-s", fmt.Sprintf("%.1f", float64(sampleRate)/1000.0), "-", "-")
+	cmdLame.Stdin = bytes.NewReader(pcm)
+	var outLame bytes.Buffer
+	cmdLame.Stdout = &outLame
+	if err := cmdLame.Run(); err == nil && outLame.Len() > 0 {
+		return outLame.Bytes(), nil
+	}
+
+	return nil, fmt.Errorf("no se detectó ffmpeg ni lame en el PATH de producción para codificación MP3 real")
 }
 
 func (e *GeminiVoiceEngine) Close() error {
@@ -496,7 +526,7 @@ func NewMemoryStore() *MemoryStore {
 		ProjectID:    models.ProjectNuestraParroquia,
 		Name:         "Padre X",
 		Role:         "Párroco & Guía Espiritual",
-		GeminiVoice:  "Charon",
+		KlikVoice:    "solusol-deep",
 		Tone:         "Solemne, pausado, reflexivo y pastoral",
 		Pitch:        0.95,
 		Speed:        0.92,
@@ -508,7 +538,7 @@ func NewMemoryStore() *MemoryStore {
 		ProjectID:    models.ProjectNuestraParroquia,
 		Name:         "Lectora Parroquial",
 		Role:         "Lecturas y Salmos",
-		GeminiVoice:  "Kore",
+		KlikVoice:    "solusol-bright",
 		Tone:         "Cálido, respetuoso y diáfano",
 		Pitch:        1.0,
 		Speed:        0.95,
@@ -522,7 +552,7 @@ func NewMemoryStore() *MemoryStore {
 		ProjectID:    models.ProjectComunidadRadio,
 		Name:         "Voz B (Máster Cadena)",
 		Role:         "Locutor Master de Cadena",
-		GeminiVoice:  "Charon",
+		KlikVoice:    "solusol-deep",
 		Tone:         "Imponente, autoritario y de alto impacto radial",
 		Pitch:        0.90,
 		Speed:        0.98,
@@ -534,7 +564,7 @@ func NewMemoryStore() *MemoryStore {
 		ProjectID:    models.ProjectComunidadRadio,
 		Name:         "Conductora FM Nocturna",
 		Role:         "Conducción de Magacín Nocturno",
-		GeminiVoice:  "Kore",
+		KlikVoice:    "solusol-bright",
 		Tone:         "Aterciopelado, íntimo y empático",
 		Pitch:        1.02,
 		Speed:        0.94,
@@ -548,7 +578,7 @@ func NewMemoryStore() *MemoryStore {
 		ProjectID:    models.ProjectLocucion,
 		Name:         "Voz C (Locutor Institucional)",
 		Role:         "Voz Institucional & Corporativa",
-		GeminiVoice:  "Zephyr",
+		KlikVoice:    "klik-master",
 		Tone:         "Seguro, elegante, prestigioso y articulado",
 		Pitch:        0.98,
 		Speed:        1.0,
@@ -894,17 +924,9 @@ func writeJSON(w http.ResponseWriter, status int, data interface{}) {
   {
     path: 'go.mod',
     title: 'go.mod (Módulo Go)',
-    description: 'Definición del módulo Go y dependencias de Google Generative AI para Go.',
+    description: 'Definición del módulo Go para la arquitectura de compilación nativa.',
     language: 'mod',
-    content: `module voicestudio
-
-go 1.22
-
-require (
-	github.com/google/generative-ai-go v0.19.0
-	google.golang.org/api v0.186.0
-)
-`
+    content: `module voicestudio\n\ngo 1.22\n`
   },
   {
     path: 'Dockerfile',

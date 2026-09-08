@@ -67,7 +67,7 @@ if (Test-Path $goCodePath) {
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
     # Extraer pares de path y contenido embebido usando expresiones regulares
-    $goMatches = [regex]::Matches($tsContent, 'path:\s*[''"]([^''"]+)[''"][\s\S]*?content:\s*`((?:[^`\\]|\\.)*)`')
+    $goMatches = [regex]::Matches($tsContent, 'path:\s*[''"]([^''"]+)[''"][\s\S]*?content:\s*`([\s\S]*?)`(?=\s*\})')
     foreach ($match in $goMatches) {
         $path = $match.Groups[1].Value
         $content = $match.Groups[2].Value
@@ -79,8 +79,8 @@ if (Test-Path $goCodePath) {
             New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
         }
         
-        # Limpiar secuencias de escape del string de TypeScript
-        $cleanContent = $content.Replace('\`', '`').Replace('\\', '\')
+        # Limpiar secuencias de escape de TypeScript sin alterar rutas UNC de Windows legítimas
+        $cleanContent = $content.Replace('\`', '`').Replace('\\n', [char]10).Replace('\\"', '"')
         
         # Escribir forzando codificación UTF-8 sin BOM
         [System.IO.File]::WriteAllText($targetPath, $cleanContent, $utf8NoBom)
