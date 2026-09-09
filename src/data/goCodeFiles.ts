@@ -1,1113 +1,987 @@
-import { GoCodeFile } from '../types';
-
-export const GO_CODE_FILES: GoCodeFile[] = [
-  {
-    path: 'cmd/server/main.go',
-    title: 'main.go (Servidor Principal)',
-    description: 'Punto de entrada de Voice Studio en Go. Inicializa el motor de voz con IA, almacenamiento multi-tenant, enrutador HTTP y apagado controlado.',
-    language: 'go',
-    content: `package main
-
-import (
-	"context"
-	"fmt"
-	"log"
-	"net/http"
-	"os"
-	"os/signal"
-	"syscall"
-	"time"
-
-	"voicestudio/pkg/engine"
-	"voicestudio/pkg/handlers"
-	"voicestudio/pkg/storage"
-)
-
-func main() {
-	fmt.Println("🎙️  Iniciando Voice Studio...")
-	log.Println("==========================================================")
-	log.Println("🎙️  VOICE STUDIO by KLIK - Agencia Centralizada de Voces IA")
-	log.Println("    Aislamiento Multi-Tenant: NuestraParroquia, Comunidad de Radio, etc.")
-	log.Println("    Banco de Voces: Padre X, Voz B, Voz C...")
-	log.Println("    Formatos: MP3 | WAV | STREAM (100% Autónomo / No GitHub)")
-	log.Println("==========================================================")
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// 2. Inicializar Almacenamiento Multi-Tenant Aislado
-	store := storage.NewMemoryStore()
-	log.Println("✅ Almacén de identidades y contenidos inicializado con éxito.")
-
-	// 3. Inicializar el Voice Engine (Motor de IA para Texto -> Audio)
-	voiceEngine, err := engine.NewStudioVoiceEngine(ctx)
-	if err != nil {
-		log.Fatalf("❌ Error crítico inicializando Voice Engine: %v", err)
-	}
-	defer voiceEngine.Close()
-	log.Println("✅ Voice Engine (SOLUSOL.NET Local-First Engine) listo.")
-
-	// 4. Configurar Enrutador y Handlers HTTP
-	apiHandler := handlers.NewAPIHandler(store, voiceEngine)
-	mux := http.NewServeMux()
-	apiHandler.RegisterRoutes(mux)
-
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-
-	server := &http.Server{
-		Addr:         ":" + port,
-		Handler:      mux,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 60 * time.Second,
-		IdleTimeout:  120 * time.Second,
-	}
-
-	// 5. Arranque en goroutine y Graceful Shutdown
-	go func() {
-		log.Printf("🚀 Servidor Voice Studio escuchando en http://0.0.0.0:%s", port)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("❌ Error en servidor HTTP: %v", err)
-		}
-	}()
-
-	// Esperar señal de terminación (SIGINT, SIGTERM)
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-
-	log.Println("🛑 Apagando Voice Studio de forma segura...")
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer shutdownCancel()
-
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		log.Printf("⚠️ Forzando cierre del servidor: %v", err)
-	}
-	log.Println("👋 Voice Studio finalizado correctamente.")
-}
-`
-  },
-  {
-    path: 'pkg/models/models.go',
-    title: 'models.go (Dominio y Entidades)',
-    description: 'Estructuras de datos en Go que modelan proyectos separados, voces autorizadas (Padre X, Locutores), solicitudes de locución y formatos MP3/WAV/STREAM.',
-    language: 'go',
-    content: `package models
-
-import "time"
-
-// ProjectID identifica de forma estricta los entornos aislados
-type ProjectID string
-
-const (
-	ProjectNuestraParroquia ProjectID = "nuestraparroquia"
-	ProjectComunidadRadio   ProjectID = "comunidad-radio"
-	ProjectLocucion         ProjectID = "locucion"
-	ProjectPublicidad       ProjectID = "publicidad"
-	ProjectNarracion        ProjectID = "narracion"
-	ProjectPodcast          ProjectID = "podcast"
-	ProjectOtrosProyectos   ProjectID = "otros-proyectos"
-)
-
-// AudioFormat representa los formatos de salida del Voice Engine
-type AudioFormat string
-
-const (
-	FormatMP3    AudioFormat = "MP3"    // Comprimido para podcast y web
-	FormatWAV    AudioFormat = "WAV"    // Calidad estudio 24kHz sin comprimir
-	FormatSTREAM AudioFormat = "STREAM" // Transmisión en tiempo real (SSE / Chunked)
-)
-
-// Project define la configuración y límites de cada tenant
-type Project struct {
-	ID          ProjectID \`json:"id"\`
-	Name        string    \`json:"name"\`
-	Domain      string    \`json:"domain"\`
-	Description string    \`json:"description"\`
-	Active      bool      \`json:"active"\`
-}
-
-// VoiceProfile representa una voz autorizada dentro de un proyecto específico
-type VoiceProfile struct {
-	ID           string    \`json:"id"\`
-	ProjectID    ProjectID \`json:"project_id"\`   // Aislamiento: pertenece solo a este proyecto
-	Name         string    \`json:"name"\`         // Ej: "Padre X", "Carlos Morales"
-	Role         string    \`json:"role"\`         // Ej: "Párroco", "Locutor Central"
-	KlikVoice    string    \`json:"klik_voice"\`   // solusol-deep, solusol-bright, klik-master...
-	Tone         string    \`json:"tone"\`         // Solemne, Radiofónico, Cálido, etc.
-	Pitch        float64   \`json:"pitch"\`        // 0.8 - 1.2
-	Speed        float64   \`json:"speed"\`        // 0.8 - 1.3
-	IsAuthorized bool      \`json:"is_authorized"\`// Solo voces autorizadas pueden generar audio
-	CreatedAt    time.Time \`json:"created_at"\`
-}
-
-// SynthesisRequest es la petición enviada al Voice Engine
-type SynthesisRequest struct {
-	ProjectID       ProjectID   \`json:"project_id"\`
-	VoiceID         string      \`json:"voice_id"\`
-	Text            string      \`json:"text"\`
-	Title           string      \`json:"title"\`
-	Format          AudioFormat \`json:"format"\` // MP3, WAV, STREAM
-	ToneInstruction string      \`json:"tone_instruction,omitempty"\`
-}
-
-// LocutionRecord representa el contenido de audio generado y archivado
-type LocutionRecord struct {
-	ID              string      \`json:"id"\`
-	ProjectID       ProjectID   \`json:"project_id"\`
-	VoiceID         string      \`json:"voice_id"\`
-	VoiceName       string      \`json:"voice_name"\`
-	Title           string      \`json:"title"\`
-	Text            string      \`json:"text"\`
-	Format          AudioFormat \`json:"format"\`
-	DurationSeconds float64     \`json:"duration_seconds"\`
-	FileSizeBytes   int64       \`json:"file_size_bytes"\`
-	MimeType        string      \`json:"mime_type"\`
-	AudioData       []byte      \`json:"-"\` // Datos binarios de audio
-	CreatedAt       time.Time   \`json:"created_at"\`
-}
-`
-  },
-  {
-    path: 'pkg/engine/engine.go',
-    title: 'engine.go (Voice Engine IA)',
-    description: 'Motor de síntesis de voz en Go. Conecta con la API de IA Gemini TTS, genera PCM de 24kHz, empaqueta encabezados RIFF WAV, genera MP3 y streams en tiempo real.',
-    language: 'go',
-    content: `package engine
-
-import (
-	"bytes"
-	"context"
-	"encoding/binary"
-	"fmt"
-	"log"
-	"math"
-	"net/http"
-	"os/exec"
-	"sync"
-	"time"
-
-	"voicestudio/pkg/models"
-)
-
-// StudioProfileConfig representa la porción de hardware y codificación del perfil dinámico
-type StudioProfileConfig struct {
-	ID         string `json:"id"`
-	StudioType string `json:"type"`
-	Hardware   struct {
-		SampleRate int `json:"sampleRate"`
-		BitDepth   int `json:"bitDepth"`
-		Channels   int `json:"channels"`
-	} `json:"hardware"`
-	ActiveBrandingName string `json:"brandingName"`
-}
-
-// VoiceEngine define la interfaz central para la transformación de Texto a Audio
-type VoiceEngine interface {
-	Synthesize(ctx context.Context, voice *models.VoiceProfile, text string, format models.AudioFormat) ([]byte, float64, error)
-	StreamBroadcast(ctx context.Context, voice *models.VoiceProfile, text string, w http.ResponseWriter) error
-	Close() error
-}
-
-// StudioVoiceEngine implementa VoiceEngine para procesamiento de audio local y de producción de Solusol
-type StudioVoiceEngine struct {
-	mu            sync.RWMutex
-	activeProfile StudioProfileConfig
-}
-
-// NewStudioVoiceEngine crea una nueva instancia del motor de voz
-func NewStudioVoiceEngine(ctx context.Context) (*StudioVoiceEngine, error) {
-	// Instancia compatible con la plataforma de APIs SOLUSOL.NET SIC y KLIK Soft PRO
-	defaultProfile := StudioProfileConfig{}
-	defaultProfile.Hardware.SampleRate = 44100
-	defaultProfile.Hardware.BitDepth = 24
-	defaultProfile.Hardware.Channels = 1
-	return &StudioVoiceEngine{
-		activeProfile: defaultProfile,
-	}, nil
-}
-
-// UpdateProfile actualiza en caliente los metadatos de hardware y comportamiento de renderizado.
-// Retorna true si los cambios físicos en los parámetros del hardware exigen reiniciar el pipeline de audio.
-func (e *StudioVoiceEngine) UpdateProfile(profile StudioProfileConfig) bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	requiresRestart := false
-	if e.activeProfile.Hardware.SampleRate != profile.Hardware.SampleRate ||
-		e.activeProfile.Hardware.BitDepth != profile.Hardware.BitDepth ||
-		e.activeProfile.Hardware.Channels != profile.Hardware.Channels {
-		requiresRestart = true
-	}
-
-	if requiresRestart {
-		log.Printf("[SOLUSOL SIC API] CAMBIO FÍSICO DETECTADO: El cambio a %dHz, %d-bit (canales: %d) requiere REINICIAR el pipeline de audio.",
-			profile.Hardware.SampleRate, profile.Hardware.BitDepth, profile.Hardware.Channels)
-	} else {
-		log.Printf("[SOLUSOL SIC API] Reconfiguración en caliente exitosa para branding '%s' (%s)",
-			profile.ActiveBrandingName, profile.StudioType)
-	}
-
-	e.activeProfile = profile
-	return requiresRestart
-}
-
-// Synthesize convierte texto en audio en formato WAV, MP3 o STREAM
-func (e *StudioVoiceEngine) Synthesize(ctx context.Context, voice *models.VoiceProfile, text string, format models.AudioFormat) ([]byte, float64, error) {
-	if !voice.IsAuthorized {
-		return nil, 0, fmt.Errorf("la voz '%s' no cuenta con autorización para generar locuciones", voice.Name)
-	}
-
-	log.Printf("[Voice Engine] Sintetizando para proyecto '%s' con voz '%s' (%s) en formato %s",
-		voice.ProjectID, voice.Name, voice.KlikVoice, format)
-
-	// 1. Obtener audio crudo PCM (mediante Gemini API o fallback armónico de estudio)
-	// Usando dinámicamente la configuración del perfil activo bajo un cerrojo de lectura
-	e.mu.RLock()
-	targetSampleRate := e.activeProfile.Hardware.SampleRate
-	channels := e.activeProfile.Hardware.Channels
-	bitDepth := e.activeProfile.Hardware.BitDepth
-	e.mu.RUnlock()
-
-	if targetSampleRate <= 0 || channels <= 0 || bitDepth <= 0 {
-		return nil, 0, fmt.Errorf("invalid hardware configuration parameters")
-	}
-
-	pcmData, duration, err := e.generatePCM(voice, text, targetSampleRate)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	// 2. Transcodificar según el formato requerido (WAV o MP3)
-	switch format {
-	case models.FormatWAV:
-		wavBytes := EncodeWAV(pcmData, targetSampleRate, channels, bitDepth)
-		return wavBytes, duration, nil
-
-	case models.FormatMP3:
-		mp3Bytes, err := EncodeMP3Frame(pcmData, targetSampleRate, channels, bitDepth)
-		if err != nil {
-			return nil, 0, err
-		}
-		return mp3Bytes, duration, nil
-
-	case models.FormatSTREAM:
-		wavBytes := EncodeWAV(pcmData, targetSampleRate, channels, bitDepth)
-		return wavBytes, duration, nil
-
-	default:
-		return EncodeWAV(pcmData, targetSampleRate, channels, bitDepth), duration, nil
-	}
-}
-
-// StreamBroadcast emite el audio en tiempo real mediante Server-Sent Events o Chunked Transfer
-func (e *StudioVoiceEngine) StreamBroadcast(ctx context.Context, voice *models.VoiceProfile, text string, w http.ResponseWriter) error {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		return fmt.Errorf("el cliente HTTP no soporta streaming")
-	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
-
-	// Emitir evento inicial de sincronización
-	fmt.Fprintf(w, "event: init\\ndata: {\\"project\\":\\"%s\\",\\"voice\\":\\"%s\\",\\"status\\":\\"connected\\"}\\n\\n",
-		voice.ProjectID, voice.Name)
-	flusher.Flush()
-
-	// Segmentar texto en bloques para transmisión fluida bajo cerrojo de lectura seguro
-	e.mu.RLock()
-	targetSampleRate := e.activeProfile.Hardware.SampleRate
-	channels := e.activeProfile.Hardware.Channels
-	bitDepth := e.activeProfile.Hardware.BitDepth
-	e.mu.RUnlock()
-
-	if targetSampleRate <= 0 || channels <= 0 || bitDepth <= 0 {
-		return fmt.Errorf("invalid hardware configuration parameters")
-	}
-
-	pcmData, _, err := e.generatePCM(voice, text, targetSampleRate)
-	if err != nil {
-		return err
-	}
-	chunkSize := targetSampleRate * (bitDepth / 8) * channels // ~1 segundo de audio por chunk
-
-	totalChunks := (len(pcmData) + chunkSize - 1) / chunkSize
-	for i := 0; i < totalChunks; i++ {
-		select {
-		case <-ctx.Done():
-			log.Println("[Voice Engine] Transmisión cancelada por el cliente")
-			return ctx.Err()
-		default:
-			start := i * chunkSize
-			end := start + chunkSize
-			if end > len(pcmData) {
-				end = len(pcmData)
-			}
-
-			chunkWav := EncodeWAV(pcmData[start:end], targetSampleRate, channels, bitDepth)
-			fmt.Fprintf(w, "event: audio_chunk\\ndata: {\\"chunk_index\\":%d,\\"size_bytes\\":%d}\\n\\n", i, len(chunkWav))
-			flusher.Flush()
-
-			// Emular cadencia de transmisión radial
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(500 * time.Millisecond):
-			}
-		}
-	}
-
-	fmt.Fprintf(w, "event: complete\\ndata: {\\"status\\":\\"stream_finished\\"}\\n\\n")
-	flusher.Flush()
-	return nil
-}
-
-// generatePCM produce el buffer de audio PCM de 16 bits little-endian a 24000Hz
-func (e *StudioVoiceEngine) generatePCM(voice *models.VoiceProfile, text string, sampleRate int) ([]byte, float64, error) {
-	durationSec := math.Max(2.5, float64(len(text))/15.0)
-	numSamples := int(float64(sampleRate) * durationSec)
-
-	buf := new(bytes.Buffer)
-
-	// Frecuencia base según el perfil de voz (grave para Padre X y locutor central, agudo para lectoras)
-	baseFreq := 180.0
-	if voice.KlikVoice == "solusol-deep" || voice.KlikVoice == "klik-incisive" {
-		baseFreq = 140.0
-	} else if voice.KlikVoice == "solusol-bright" || voice.KlikVoice == "klik-master" {
-		baseFreq = 240.0
-	}
-
-	for i := 0; i < numSamples; i++ {
-		t := float64(i) / float64(sampleRate)
-		env := math.Sin((math.Pi * float64(i)) / float64(numSamples))
-		sample := (math.Sin(2*math.Pi*baseFreq*t)*0.6 +
-			math.Sin(2*math.Pi*(baseFreq*1.5)*t)*0.25 +
-			math.Sin(2*math.Pi*(baseFreq*2.0)*t)*0.15) * env
-
-		val := int16(sample * 24000.0)
-		binary.Write(buf, binary.LittleEndian, val)
-	}
-
-	return buf.Bytes(), durationSec, nil
-}
-
-// EncodeWAV añade el encabezado RIFF WAVE estándar de 44 bytes a los datos PCM
-func EncodeWAV(pcm []byte, sampleRate, channels, bitsPerSample int) []byte {
-	byteRate := (sampleRate * channels * bitsPerSample) / 8
-	blockAlign := (channels * bitsPerSample) / 8
-	dataSize := uint32(len(pcm))
-	formatCode := uint16(1) // 1 = PCM Integer
-	if bitsPerSample == 32 {
-		formatCode = 3 // 3 = IEEE Float
-	}
-
-	buf := new(bytes.Buffer)
-
-	// 1. Chunk RIFF
-	buf.WriteString("RIFF")
-	binary.Write(buf, binary.LittleEndian, uint32(36+dataSize))
-	buf.WriteString("WAVE")
-
-	// 2. Sub-chunk "fmt "
-	buf.WriteString("fmt ")
-	binary.Write(buf, binary.LittleEndian, uint32(16)) // PCM subchunk size
-	binary.Write(buf, binary.LittleEndian, formatCode)
-	binary.Write(buf, binary.LittleEndian, uint16(channels))
-	binary.Write(buf, binary.LittleEndian, uint32(sampleRate))
-	binary.Write(buf, binary.LittleEndian, uint32(byteRate))
-	binary.Write(buf, binary.LittleEndian, uint16(blockAlign))
-	binary.Write(buf, binary.LittleEndian, uint16(bitsPerSample))
-
-	// 3. Sub-chunk "data"
-	buf.WriteString("data")
-	binary.Write(buf, binary.LittleEndian, dataSize)
-	buf.Write(pcm)
-
-	return buf.Bytes()
-}
-
-// EncodeMP3Frame genera un contenedor MP3 real mediante transcodificación por tubería ffmpeg/lame
-func EncodeMP3Frame(pcm []byte, sampleRate, channels, bitsPerSample int) ([]byte, error) {
-	// Generar contenedor WAV temporal para alimentar al codificador de línea de comandos
-	wavBytes := EncodeWAV(pcm, sampleRate, channels, bitsPerSample)
-
-	// Intentar utilizar ffmpeg en PATH para conversión nativa de alta fidelidad
-	cmd := exec.Command("ffmpeg", "-i", "pipe:0", "-f", "mp3", "pipe:1")
-	cmd.Stdin = bytes.NewReader(wavBytes)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	if err := cmd.Run(); err == nil && out.Len() > 0 {
-		return out.Bytes(), nil
-	}
-
-	// Alternativa: intentar usar LAME si ffmpeg no está disponible
-	cmdLame := exec.Command("lame", "-r", "-s", fmt.Sprintf("%.1f", float64(sampleRate)/1000.0), "-", "-")
-	cmdLame.Stdin = bytes.NewReader(pcm)
-	var outLame bytes.Buffer
-	cmdLame.Stdout = &outLame
-	if err := cmdLame.Run(); err == nil && outLame.Len() > 0 {
-		return outLame.Bytes(), nil
-	}
-
-	return nil, fmt.Errorf("no se detectó ffmpeg ni lame en el PATH de producción para codificación MP3 real")
-}
-
-func (e *GeminiVoiceEngine) Close() error {
-	return nil
-}
-`
-  },
-  {
-    path: 'pkg/storage/storage.go',
-    title: 'storage.go (Aislamiento Multi-Tenant)',
-    description: 'Gestor de persistencia thread-safe en Go. Garantiza la estricta separación de identidades (Padre X vs Locutores) y contenidos entre NuestraParroquia.online y Comunidad de Radio.',
-    language: 'go',
-    content: `package storage
-
-import (
-	"fmt"
-	"sync"
-	"time"
-
-	"voicestudio/pkg/models"
-)
-
-// Store define las operaciones de persistencia multi-proyecto
-type Store interface {
-	GetProject(id models.ProjectID) (*models.Project, error)
-	ListVoices(projectID models.ProjectID) []*models.VoiceProfile
-	GetVoice(id string) (*models.VoiceProfile, error)
-	SaveVoice(voice *models.VoiceProfile) error
-	SaveLocution(locution *models.LocutionRecord) error
-	ListLocutions(projectID models.ProjectID) []*models.LocutionRecord
-	GetLocution(id string) (*models.LocutionRecord, error)
-}
-
-// MemoryStore almacena en memoria asegurando concurrencia segura con RWMutex
-type MemoryStore struct {
-	mu        sync.RWMutex
-	projects  map[models.ProjectID]*models.Project
-	voices    map[string]*models.VoiceProfile
-	locutions map[string]*models.LocutionRecord
-}
-
-// NewMemoryStore inicializa el catálogo con las voces oficiales pre-configuradas
-func NewMemoryStore() *MemoryStore {
-	s := &MemoryStore{
-		projects:  make(map[models.ProjectID]*models.Project),
-		voices:    make(map[string]*models.VoiceProfile),
-		locutions: make(map[string]*models.LocutionRecord),
-	}
-
-	// 1. Proyectos aislados
-	s.projects[models.ProjectNuestraParroquia] = &models.Project{
-		ID:          models.ProjectNuestraParroquia,
-		Name:        "NuestraParroquia.online",
-		Domain:      "nuestraparroquia.online",
-		Description: "Plataforma de voz pastoral para homilías, avisos litúrgicos y comunidad de fe.",
-		Active:      true,
-	}
-	s.projects[models.ProjectComunidadRadio] = &models.Project{
-		ID:          models.ProjectComunidadRadio,
-		Name:        "Comunidad de Radio",
-		Domain:      "comunidadradio.live",
-		Description: "Estudio radial para locutores titulares, cuñas publicitarias y transmisión continua.",
-		Active:      true,
-	}
-
-	// 2. Voces autorizadas iniciales de NuestraParroquia.online (Padre X y equipo)
-	s.voices["voice-padre-x"] = &models.VoiceProfile{
-		ID:           "voice-padre-x",
-		ProjectID:    models.ProjectNuestraParroquia,
-		Name:         "Padre X",
-		Role:         "Párroco & Guía Espiritual",
-		KlikVoice:    "solusol-deep",
-		Tone:         "Solemne, pausado, reflexivo y pastoral",
-		Pitch:        0.95,
-		Speed:        0.92,
-		IsAuthorized: true,
-		CreatedAt:    time.Now(),
-	}
-	s.voices["voice-lectora-parroquia"] = &models.VoiceProfile{
-		ID:           "voice-lectora-parroquia",
-		ProjectID:    models.ProjectNuestraParroquia,
-		Name:         "Lectora Parroquial",
-		Role:         "Lecturas y Salmos",
-		KlikVoice:    "solusol-bright",
-		Tone:         "Cálido, respetuoso y diáfano",
-		Pitch:        1.0,
-		Speed:        0.95,
-		IsAuthorized: true,
-		CreatedAt:    time.Now(),
-	}
-
-	// 3. Voces autorizadas iniciales de Comunidad de Radio (Voz B y equipo)
-	s.voices["voice-voz-b-master"] = &models.VoiceProfile{
-		ID:           "voice-voz-b-master",
-		ProjectID:    models.ProjectComunidadRadio,
-		Name:         "Voz B (Máster Cadena)",
-		Role:         "Locutor Master de Cadena",
-		KlikVoice:    "solusol-deep",
-		Tone:         "Imponente, autoritario y de alto impacto radial",
-		Pitch:        0.90,
-		Speed:        0.98,
-		IsAuthorized: true,
-		CreatedAt:    time.Now(),
-	}
-	s.voices["voice-fm-nocturna"] = &models.VoiceProfile{
-		ID:           "voice-fm-nocturna",
-		ProjectID:    models.ProjectComunidadRadio,
-		Name:         "Conductora FM Nocturna",
-		Role:         "Conducción de Magacín Nocturno",
-		KlikVoice:    "solusol-bright",
-		Tone:         "Aterciopelado, íntimo y empático",
-		Pitch:        1.02,
-		Speed:        0.94,
-		IsAuthorized: true,
-		CreatedAt:    time.Now(),
-	}
-
-	// 4. Locución e Institucional (Voz C)
-	s.voices["voice-voz-c-institucional"] = &models.VoiceProfile{
-		ID:           "voice-voz-c-institucional",
-		ProjectID:    models.ProjectLocucion,
-		Name:         "Voz C (Locutor Institucional)",
-		Role:         "Voz Institucional & Corporativa",
-		KlikVoice:    "klik-master",
-		Tone:         "Seguro, elegante, prestigioso y articulado",
-		Pitch:        0.98,
-		Speed:        1.0,
-		IsAuthorized: true,
-		CreatedAt:    time.Now(),
-	}
-
-	return s
-}
-
-func (s *MemoryStore) GetProject(id models.ProjectID) (*models.Project, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	p, ok := s.projects[id]
-	if !ok {
-		return nil, fmt.Errorf("proyecto '%s' no encontrado", id)
-	}
-	return p, nil
-}
-
-// ListVoices filtra estrictamente por ProjectID garantizando la separación de identidades
-func (s *MemoryStore) ListVoices(projectID models.ProjectID) []*models.VoiceProfile {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	var result []*models.VoiceProfile
-	for _, v := range s.voices {
-		if projectID == "" || v.ProjectID == projectID {
-			result = append(result, v)
-		}
-	}
-	return result
-}
-
-func (s *MemoryStore) GetVoice(id string) (*models.VoiceProfile, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	v, ok := s.voices[id]
-	if !ok {
-		return nil, fmt.Errorf("voz '%s' no encontrada", id)
-	}
-	return v, nil
-}
-
-func (s *MemoryStore) SaveVoice(voice *models.VoiceProfile) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.voices[voice.ID] = voice
-	return nil
-}
-
-func (s *MemoryStore) SaveLocution(loc *models.LocutionRecord) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.locutions[loc.ID] = loc
-	return nil
-}
-
-// ListLocutions retorna el historial exclusivo del proyecto consultado
-func (s *MemoryStore) ListLocutions(projectID models.ProjectID) []*models.LocutionRecord {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	var result []*models.LocutionRecord
-	for _, l := range s.locutions {
-		if projectID == "" || l.ProjectID == projectID {
-			result = append(result, l)
-		}
-	}
-	return result
-}
-
-func (s *MemoryStore) GetLocution(id string) (*models.LocutionRecord, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	l, ok := s.locutions[id]
-	if !ok {
-		return nil, fmt.Errorf("locución '%s' no encontrada", id)
-	}
-	return l, nil
-}
-`
-  },
-  {
-    path: 'pkg/handlers/handlers.go',
-    title: 'handlers.go (Endpoints REST & Streaming)',
-    description: 'Controladores HTTP en Go para administración de voces autorizadas, generación de locuciones en MP3/WAV y transmisión en vivo por SSE (STREAM).',
-    language: 'go',
-    content: `package handlers
-
-import (
-	"encoding/json"
-	"fmt"
-	"net/http"
-	"time"
-
-	"voicestudio/pkg/engine"
-	"voicestudio/pkg/models"
-	"voicestudio/pkg/storage"
-)
-
-// APIHandler gestiona las rutas REST y de streaming
-type APIHandler struct {
-	store  storage.Store
-	engine engine.VoiceEngine
-}
-
-func NewAPIHandler(store storage.Store, engine engine.VoiceEngine) *APIHandler {
-	return &APIHandler{
-		store:  store,
-		engine: engine,
-	}
-}
-
-// RegisterRoutes expone los endpoints unificados de SOLUSOL.NET SIC y KLIK Soft PRO
-func (h *APIHandler) RegisterRoutes(mux *http.ServeMux) {
-	// Studio e Identidad
-	mux.HandleFunc("GET /api/v1/studio/profile", h.handleGetStudioProfile)
-
-	// Media e Ingestión
-	mux.HandleFunc("GET /api/v1/media/voices", h.handleListVoices)
-	mux.HandleFunc("POST /api/v1/media/voices", h.handleCreateVoice)
-	mux.HandleFunc("GET /api/v1/media/recordings", h.handleListLocutions)
-	mux.HandleFunc("GET /api/v1/media/download/{id}", h.handleDownloadAudio)
-
-	// Voice, AI y Audio
-	mux.HandleFunc("POST /api/v1/voice/synthesize", h.handleGenerate)
-	mux.HandleFunc("GET /api/v1/voice/stream", h.handleStream)
-
-	// Infraestructura y Monitoreo
-	mux.HandleFunc("GET /api/v1/nodes", h.handleListNodes)
-	mux.HandleFunc("GET /api/v1/audit", h.handleListAuditLogs)
-}
-
-func (h *APIHandler) handleListProjects(w http.ResponseWriter, r *http.Request) {
-	projects := []models.Project{
-		{
-			ID:          models.ProjectNuestraParroquia,
-			Name:        "NuestraParroquia.online",
-			Domain:      "nuestraparroquia.online",
-			Description: "Espacio para Padre X y equipo pastoral",
-			Active:      true,
-		},
-		{
-			ID:          models.ProjectComunidadRadio,
-			Name:        "Comunidad de Radio",
-			Domain:      "comunidadradio.live",
-			Description: "Espacio de locutores y transmisión radial",
-			Active:      true,
-		},
-	}
-	writeJSON(w, http.StatusOK, projects)
-}
-
-func (h *APIHandler) handleGetStudioProfile(w http.ResponseWriter, r *http.Request) {
-	profile := map[string]interface{}{
-		"id": "go-native-instance",
-		"type": "RADIO",
-		"branding": map[string]string{
-			"name": "SOLUSOL Go Native Broadcast Studio",
-		},
-	}
-	writeJSON(w, http.StatusOK, profile)
-}
-
-func (h *APIHandler) handleListNodes(w http.ResponseWriter, r *http.Request) {
-	nodes := []map[string]interface{}{
-		{
-			"id": "go-native-node",
-			"name": "Go Native DSP Render Node",
-			"type": "RENDER_NODE",
-			"status": "active",
-		},
-	}
-	writeJSON(w, http.StatusOK, nodes)
-}
-
-func (h *APIHandler) handleListAuditLogs(w http.ResponseWriter, r *http.Request) {
-	logs := []map[string]interface{}{
-		{
-			"id": "audit-go-init",
-			"timestamp": time.Now().Format(time.RFC3339),
-			"action": "GO_ENGINE_STARTED",
-			"payload": map[string]string{"status": "ok"},
-		},
-	}
-	writeJSON(w, http.StatusOK, logs)
-}
-
-func (h *APIHandler) handleListVoices(w http.ResponseWriter, r *http.Request) {
-	projectID := models.ProjectID(r.URL.Query().Get("project_id"))
-	voices := h.store.ListVoices(projectID)
-	writeJSON(w, http.StatusOK, voices)
-}
-
-func (h *APIHandler) handleCreateVoice(w http.ResponseWriter, r *http.Request) {
-	var voice models.VoiceProfile
-	if err := json.NewDecoder(r.Body).Decode(&voice); err != nil {
-		http.Error(w, "JSON inválido", http.StatusBadRequest)
-		return
-	}
-
-	if voice.Name == "" || voice.ProjectID == "" {
-		http.Error(w, "Nombre y project_id son obligatorios", http.StatusBadRequest)
-		return
-	}
-
-	if voice.ID == "" {
-		voice.ID = fmt.Sprintf("voice-%d", time.Now().UnixNano())
-	}
-	voice.CreatedAt = time.Now()
-
-	if err := h.store.SaveVoice(&voice); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	writeJSON(w, http.StatusCreated, voice)
-}
-
-func (h *APIHandler) handleToggleAuthorize(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	voice, err := h.store.GetVoice(id)
-	if err != nil {
-		http.Error(w, "Voz no encontrada", http.StatusNotFound)
-		return
-	}
-
-	voice.IsAuthorized = !voice.IsAuthorized
-	_ = h.store.SaveVoice(voice)
-	writeJSON(w, http.StatusOK, voice)
-}
-
-// handleGenerate procesa solicitudes Texto -> Audio en formatos MP3 y WAV
-func (h *APIHandler) handleGenerate(w http.ResponseWriter, r *http.Request) {
-	var req models.SynthesisRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "JSON inválido", http.StatusBadRequest)
-		return
-	}
-
-	if req.Text == "" || req.VoiceID == "" {
-		http.Error(w, "text y voice_id son requeridos", http.StatusBadRequest)
-		return
-	}
-
-	voice, err := h.store.GetVoice(req.VoiceID)
-	if err != nil {
-		http.Error(w, "Voz especificada no existe", http.StatusBadRequest)
-		return
-	}
-
-	// Validar que la voz pertenezca estrictamente al proyecto solicitante
-	if voice.ProjectID != req.ProjectID {
-		http.Error(w, "Acceso denegado: La voz seleccionada no pertenece al proyecto actual", http.StatusForbidden)
-		return
-	}
-
-	// Ejecutar síntesis en el Voice Engine
-	audioBytes, duration, err := h.engine.Synthesize(r.Context(), voice, req.Text, req.Format)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Error en Voice Engine: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	mimeType := "audio/wav"
-	if req.Format == models.FormatMP3 {
-		mimeType = "audio/mpeg"
-	}
-
-	locution := &models.LocutionRecord{
-		ID:              fmt.Sprintf("loc-%d", time.Now().UnixNano()),
-		ProjectID:       req.ProjectID,
-		VoiceID:         voice.ID,
-		VoiceName:       voice.Name,
-		Title:           req.Title,
-		Text:            req.Text,
-		Format:          req.Format,
-		DurationSeconds: duration,
-		FileSizeBytes:   int64(len(audioBytes)),
-		MimeType:        mimeType,
-		AudioData:       audioBytes,
-		CreatedAt:       time.Now(),
-	}
-	_ = h.store.SaveLocution(locution)
-
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"success":  true,
-		"locution": locution,
-		"download_url": fmt.Sprintf("/api/v1/media/download/%s", locution.ID),
-	})
-}
-
-// handleStream provee transmisión continua en vivo (STREAM)
-func (h *APIHandler) handleStream(w http.ResponseWriter, r *http.Request) {
-	voiceID := r.URL.Query().Get("voice_id")
-	text := r.URL.Query().Get("text")
-
-	voice, err := h.store.GetVoice(voiceID)
-	if err != nil {
-		http.Error(w, "Voz no encontrada", http.StatusBadRequest)
-		return
-	}
-
-	if err := h.engine.StreamBroadcast(r.Context(), voice, text, w); err != nil {
-		// En streaming el error suele ser por desconexión del cliente
-		return
-	}
-}
-
-func (h *APIHandler) handleListLocutions(w http.ResponseWriter, r *http.Request) {
-	projectID := models.ProjectID(r.URL.Query().Get("project_id"))
-	locutions := h.store.ListLocutions(projectID)
-	writeJSON(w, http.StatusOK, locutions)
-}
-
-func (h *APIHandler) handleDownloadAudio(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	locution, err := h.store.GetLocution(id)
-	if err != nil {
-		http.Error(w, "Locución no encontrada", http.StatusNotFound)
-		return
-	}
-
-	ext := "wav"
-	if locution.Format == models.FormatMP3 {
-		ext = "mp3"
-	}
-
-	w.Header().Set("Content-Type", locution.MimeType)
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\\"locucion_%s.%s\\"", locution.ID, ext))
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(locution.AudioData)))
-	w.Write(locution.AudioData)
-}
-
-func writeJSON(w http.ResponseWriter, status int, data interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(data)
-}
-`
-  },
-  {
-    path: 'go.mod',
-    title: 'go.mod (Módulo Go)',
-    description: 'Definición del módulo Go para la arquitectura de compilación nativa.',
-    language: 'mod',
-    content: `module voicestudio\n\ngo 1.22\n`
-  },
-  {
-    path: 'Dockerfile',
-    title: 'Dockerfile (Contenedor de Producción)',
-    description: 'Construcción multi-etapa para empaquetar el servidor Voice Studio en una imagen Linux ligera y segura.',
-    language: 'dockerfile',
-    content: `# Etapa 1: Compilación
-FROM golang:1.22-alpine AS builder
-
-WORKDIR /app
-
-# Instalar certificados y dependencias
-RUN apk add --no-cache git ca-certificates
-
-COPY go.mod ./
-RUN go mod download
-
-COPY . .
-
-# Compilar binario estático optimizado
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /app/voicestudio cmd/server/main.go
-
-# Etapa 2: Imagen Final Ultraligera
-FROM alpine:3.19
-
-WORKDIR /root/
-RUN apk add --no-cache ca-certificates tzdata
-
-COPY --from=builder /app/voicestudio .
-
-EXPOSE 8080
-
-ENV PORT=8080
-ENV GIN_MODE=release
-
-ENTRYPOINT ["./voicestudio"]
-`
-  },
-  {
-    path: 'Makefile',
-    title: 'Makefile (Comandos de Automatización)',
-    description: 'Comandos make para compilar, ejecutar pruebas, correr en desarrollo y construir la imagen Docker.',
-    language: 'makefile',
-    content: `.PHONY: all build run test docker-build clean
-
-APP_NAME := voicestudio
-PORT ?= 8080
-
-all: build
-
-build:
-	@echo "🔨 Compilando binario de Voice Studio..."
-	go build -o bin/$(APP_NAME) cmd/server/main.go
-	@echo "✅ Compilado en bin/$(APP_NAME)"
-
-run:
-	@echo "🎙️ Iniciando Voice Studio en puerto $(PORT)..."
-	go run cmd/server/main.go
-
-test:
-	@echo "🧪 Ejecutando pruebas unitarias..."
-	go test -v ./...
-
-docker-build:
-	@echo "🐳 Construyendo imagen Docker..."
-	docker build -t $(APP_NAME):latest .
-
-clean:
-	@rm -rf bin/
-	@echo "🧹 Directorio bin limpiado."
-`
-  },
-  {
-    path: 'README.md',
-    title: 'README.md (Documentación Técnica)',
-    description: 'Guía paso a paso de arquitectura, instalación, variables de entorno y ejemplos curl para interactuar con la API en Go.',
-    language: 'markdown',
-    content: `# 🎙️ VOICE STUDIO - Plataforma Central de Generación de Voz con IA (Go)
-
-VOICE STUDIO es una plataforma de arquitectura limpia implementada en **Go (Golang)** que centraliza la administración y síntesis de voz mediante Inteligencia Artificial.
+# VOICE STUDIO
+
+**Plataforma configurable de generación, procesamiento y distribución de voz mediante Inteligencia Artificial**
+
+**Proyecto:** VOICE STUDIO  
+**Tecnología principal:** Go  
+**Arquitectura:** Clean Architecture / Modular / Provider-Agnostic  
+**Modelo:** Configurable / Multi-Tenant / Node-Aware  
+**Estado:** FOUNDATION
 
 ---
 
-## 📐 Diagrama de Arquitectura del Sistema
+## 1. Propósito
 
-\`\`\`
-                 VOICE STUDIO
-                      │
-          ┌───────────┴───────────┐
-          │                       │
-   NUESTRAPARROQUIA        COMUNIDAD DE RADIO
-          │                       │
-       Padre X                Locutores
-          │                       │
-          └───────────┬───────────┘
-                      │
-                 VOICE ENGINE
-                      │
-                  TEXTO → AUDIO
-                      │
-          ┌───────────┼───────────┐
-          │           │           │
-         MP3         WAV        STREAM
-\`\`\`
+VOICE STUDIO es una plataforma de software destinada a centralizar la administración, generación, procesamiento, almacenamiento y distribución de contenido de voz mediante servicios de síntesis de voz basados en Inteligencia Artificial.
+
+La plataforma **no presupone un tipo determinado de organización, industria, cliente, estación, canal, número de usuarios o cantidad de recursos**.
+
+Todo aquello que dependa de la instalación concreta debe ser configurable.
+
+VOICE STUDIO debe poder utilizarse para diferentes escenarios de producción de audio sin modificar su arquitectura fundamental.
 
 ---
 
-## 🌟 Características Principales
+# 2. Principios Arquitectónicos
 
-1. **Aislamiento Multi-Tenant Estricto:**
-   - **NuestraParroquia.online:** Administra perfiles sacerdotales y litúrgicos como el **Padre X** para homilías, avisos parroquiales y salmos.
-   - **Comunidad de Radio:** Administra perfiles de **Locutores** profesionales para noticieros, magacines, identificadores de estación y cuñas comerciales.
-   - Las voces y los audios generados permanecen completamente separados entre proyectos.
+VOICE STUDIO se construye bajo los siguientes principios:
 
-2. **Voice Engine (Motor de IA):**
-   - Transforma texto a voz mediante modelos neuronales de Google Gemini TTS.
-   - Generación de tres formatos clave:
-     - **MP3:** Comprimido y optimizado para podcasts y distribución web.
-     - **WAV:** Formato sin compresión a 24kHz / 16-bit PCM para calidad broadcast de estudio.
-     - **STREAM:** Transmisión en tiempo real (SSE / Chunked Transfer) para automatización radial.
+### 2.1 Configurable
 
-3. **Perfiles de Voz Autorizados:**
-   - Control de autorización por proyecto (\`is_authorized\`).
-   - Ajuste de tono, velocidad (\`speed\`) y tono musical (\`pitch\`).
+La instalación determina:
 
----
+- tenants
+- proyectos
+- usuarios
+- roles
+- perfiles de voz
+- proveedores
+- nodos
+- capacidades
+- formatos
+- políticas
+- almacenamiento
+- límites
+- configuraciones de audio
+- políticas de generación
+- políticas de streaming
 
-## 🚀 Puesta en Marcha en Go
-
-### Requisitos
-- Go 1.22 o superior
-- Clave de API de Google Gemini (\`GEMINI_API_KEY\`)
-
-### Ejecución Directa
-\`\`\`bash
-# 1. Descomprimir el paquete Go descargado (100% Autónomo / Sin GitHub)
-unzip voicestudio_go.zip
-cd voicestudio
-
-# 2. Configurar variable de entorno (opcional)
-export GEMINI_API_KEY="tu_clave_de_gemini"
-export PORT="8080"
-
-# 3. Ejecutar directamente con Go estándar
-go run cmd/server/main.go
-\`\`\`
+No existen cantidades fijas codificadas en la arquitectura.
 
 ---
 
-## 📡 Ejemplos de Peticiones a la API (cURL)
+### 2.2 Provider-Agnostic
 
-### 1. Generar Homilía en WAV para NuestraParroquia (Padre X)
-\`\`\`bash
-curl -X POST http://localhost:8080/api/v1/voice-engine/generate \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "project_id": "nuestraparroquia",
-    "voice_id": "voice-padre-x",
-    "title": "Homilía Dominical: El Buen Pastor",
-    "text": "Hermanos y hermanas: El Evangelio de hoy nos invita a reconocer la presencia del Señor en cada acto de amor al prójimo.",
-    "format": "WAV"
-  }'
-\`\`\`
+VOICE STUDIO no depende arquitectónicamente de un proveedor específico de Inteligencia Artificial.
 
-### 2. Generar Identificador Radial en MP3 para Comunidad de Radio (Voz B)
-\`\`\`bash
-curl -X POST http://localhost:8080/api/v1/voice-engine/generate \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "project_id": "comunidad-radio",
-    "voice_id": "voice-voz-b-master",
-    "title": "Identificador de Cadena Central",
-    "text": "Transmitiendo para toda la región: esto es Comunidad de Radio, la frecuencia informativa central.",
-    "format": "MP3"
-  }'
-\`\`\`
+El sistema debe utilizar una abstracción interna de proveedor.
 
-### 3. Conectarse a la Transmisión en Vivo (STREAM)
-\`\`\`bash
-curl -N "http://localhost:8080/api/v1/voice-engine/stream?voice_id=voice-voz-b-master&text=Iniciando+emision+especial+de+noticias"
-\`\`\`
-`
-  }
-];
+Un proveedor concreto, como Google Gemini TTS, constituye únicamente una implementación.
+
+```text
+Voice Engine
+      │
+      ▼
+Provider Interface
+      │
+      ├── Provider A
+      ├── Provider B
+      ├── Provider C
+      └── Future Provider
+```
+
+La sustitución o incorporación de proveedores no debe requerir modificar el dominio principal.
+
+---
+
+### 2.3 Node-Aware
+
+VOICE STUDIO debe contemplar desde su diseño la existencia de nodos.
+
+Un nodo puede proporcionar capacidades como:
+
+- generación
+- procesamiento
+- almacenamiento
+- streaming
+- conversión
+- administración
+- observabilidad
+
+Las capacidades disponibles son configurables.
+
+---
+
+### 2.4 Separación de responsabilidades
+
+La generación de voz, procesamiento de audio, almacenamiento y streaming son componentes diferentes.
+
+No deben convertirse en una única responsabilidad denominada simplemente `Voice Engine`.
+
+---
+
+### 2.5 Auditabilidad
+
+Las operaciones relevantes deben poder registrarse mediante un sistema de auditoría.
+
+Ejemplos:
+
+- creación de perfiles
+- modificación de configuración
+- autorización de voces
+- generación de audio
+- descarga
+- eliminación
+- cambios de proveedor
+- cambios de permisos
+- operaciones administrativas
+- errores relevantes
+
+---
+
+# 3. Arquitectura General
+
+```text
+                         VOICE STUDIO
+                              │
+                              ▼
+                     ┌─────────────────┐
+                     │   API / HTTP    │
+                     └────────┬────────┘
+                              │
+                     ┌────────▼────────┐
+                     │    Security     │
+                     │ Auth / Policies │
+                     └────────┬────────┘
+                              │
+                     ┌────────▼────────┐
+                     │  Voice Domain   │
+                     └────────┬────────┘
+                              │
+              ┌───────────────┼────────────────┐
+              │               │                │
+              ▼               ▼                ▼
+        Voice Profiles   Generation Jobs   Configuration
+              │               │                │
+              └───────────────┼────────────────┘
+                              │
+                    ┌─────────▼─────────┐
+                    │   Voice Engine    │
+                    └─────────┬─────────┘
+                              │
+                    ┌─────────▼─────────┐
+                    │ Provider Adapter  │
+                    └─────────┬─────────┘
+                              │
+             ┌────────────────┼────────────────┐
+             │                │                │
+             ▼                ▼                ▼
+        Provider A       Provider B       Provider C
+                              │
+                              ▼
+                    ┌─────────────────┐
+                    │  Audio Pipeline │
+                    └────────┬────────┘
+                             │
+                  ┌──────────┼──────────┐
+                  │          │          │
+                  ▼          ▼          ▼
+                 WAV        MP3      Other Format
+                  │          │          │
+                  └──────────┼──────────┘
+                             ▼
+                       ┌───────────┐
+                       │  Storage  │
+                       └─────┬─────┘
+                             │
+                       ┌─────▼─────┐
+                       │ Streaming │
+                       └───────────┘
+```
+
+---
+
+# 4. Componentes Principales
+
+## 4.1 API
+
+La API constituye la frontera externa de VOICE STUDIO.
+
+Debe proporcionar operaciones para:
+
+- autenticación
+- administración
+- configuración
+- tenants
+- proyectos
+- usuarios
+- roles
+- perfiles de voz
+- proveedores
+- generación
+- jobs
+- audio
+- almacenamiento
+- streaming
+- auditoría
+- health
+- capabilities
+
+La API no debe contener lógica de negocio compleja.
+
+---
+
+# 5. Voice Domain
+
+El dominio central administra las entidades relacionadas con la generación de voz.
+
+Entre ellas:
+
+```text
+Tenant
+Project
+User
+Role
+Permission
+VoiceProfile
+VoiceProvider
+GenerationJob
+AudioAsset
+Node
+Capability
+AuditEvent
+```
+
+La existencia y relación entre estas entidades debe estar determinada por la configuración y las políticas del sistema.
+
+---
+
+# 6. Tenancy
+
+VOICE STUDIO soporta aislamiento multi-tenant.
+
+Un tenant representa un contexto lógico independiente.
+
+Cada tenant puede contener una cantidad configurable de:
+
+- proyectos
+- usuarios
+- perfiles
+- voces
+- trabajos
+- recursos
+- configuraciones
+
+No se establece ninguna cantidad predeterminada como requisito arquitectónico.
+
+---
+
+# 7. Projects
+
+Un proyecto representa un espacio lógico dentro de un tenant.
+
+Un proyecto puede utilizar:
+
+- uno o varios perfiles de voz
+- uno o varios proveedores
+- determinadas capacidades
+- determinadas políticas
+- determinados formatos
+- determinados recursos de almacenamiento
+
+La configuración determina qué recursos están disponibles.
+
+---
+
+# 8. Voice Profiles
+
+Un `VoiceProfile` representa la configuración lógica de una voz.
+
+Ejemplo conceptual:
+
+```text
+VoiceProfile
+├── ID
+├── Name
+├── Provider
+├── ProviderVoiceID
+├── Language
+├── Locale
+├── AuthorizationPolicy
+├── Capabilities
+├── DefaultSettings
+└── Status
+```
+
+La plataforma no debe asumir que una voz pertenece a una profesión, organización, medio de comunicación o persona determinada.
+
+---
+
+# 9. Voice Authorization
+
+La autorización de una voz debe gestionarse mediante políticas.
+
+No debe depender exclusivamente de un campo booleano como:
+
+```text
+is_authorized
+```
+
+El sistema puede contemplar:
+
+- propietario lógico
+- tenant
+- proyecto
+- usuario
+- rol
+- permisos
+- alcance
+- estado
+- fecha de autorización
+- expiración
+- restricciones de uso
+
+La implementación exacta debe quedar definida por las políticas configuradas.
+
+---
+
+# 10. Voice Engine
+
+El Voice Engine coordina las operaciones de generación.
+
+Su responsabilidad es:
+
+1. recibir una solicitud válida
+2. validar políticas
+3. resolver el perfil de voz
+4. resolver el proveedor
+5. comprobar capacidades
+6. crear o ejecutar el generation job
+7. solicitar la síntesis
+8. entregar el resultado al pipeline de audio
+9. registrar el resultado
+10. almacenar el artefacto cuando corresponda
+
+El Voice Engine **no debe estar acoplado a un proveedor concreto**.
+
+---
+
+# 11. Provider Interface
+
+Los proveedores de TTS deben implementar una interfaz interna.
+
+Conceptualmente:
+
+```text
+VoiceProvider
+
+Generate()
+Stream()
+Capabilities()
+Health()
+```
+
+La interfaz puede evolucionar conforme se definan los contratos definitivos.
+
+Un proveedor puede ofrecer:
+
+- generación síncrona
+- generación asíncrona
+- streaming
+- diferentes idiomas
+- diferentes voces
+- diferentes formatos
+- diferentes parámetros
+
+VOICE STUDIO debe consultar sus capacidades antes de solicitar una operación no soportada.
+
+---
+
+# 12. Proveedores de IA
+
+Google Gemini TTS puede ser uno de los proveedores soportados.
+
+Su integración debe permanecer dentro de un adapter específico:
+
+```text
+providers/
+    gemini/
+        client
+        tts
+        mapper
+        capabilities
+        health
+```
+
+El resto del sistema no debe depender directamente de:
+
+```text
+GEMINI_API_KEY
+```
+
+La credencial del proveedor pertenece a la configuración del adapter correspondiente.
+
+---
+
+# 13. Generation Jobs
+
+Las generaciones deben modelarse como trabajos.
+
+Ejemplo:
+
+```text
+GenerationJob
+├── ID
+├── TenantID
+├── ProjectID
+├── VoiceProfileID
+├── Provider
+├── Input
+├── RequestedFormat
+├── Status
+├── CreatedAt
+├── StartedAt
+├── CompletedAt
+├── Error
+└── Result
+```
+
+Estados posibles:
+
+```text
+REQUESTED
+QUEUED
+PROCESSING
+COMPLETED
+FAILED
+CANCELLED
+```
+
+Los estados definitivos forman parte del contrato del sistema.
+
+---
+
+# 14. Audio Pipeline
+
+La síntesis y el formato final no deben considerarse la misma operación.
+
+El pipeline puede realizar:
+
+```text
+TTS
+ │
+ ▼
+Raw Audio
+ │
+ ▼
+Normalization
+ │
+ ▼
+Processing
+ │
+ ├── WAV
+ ├── MP3
+ ├── Other
+ └── Stream
+```
+
+Las características técnicas del audio deben ser configurables cuando el proveedor y el pipeline lo permitan.
+
+No se debe imponer globalmente una frecuencia de muestreo o profundidad de bits sin que exista una decisión contractual explícita.
+
+---
+
+# 15. Audio Formats
+
+VOICE STUDIO puede soportar diferentes formatos.
+
+Entre ellos:
+
+- WAV
+- MP3
+- otros formatos configurados
+
+La disponibilidad de cada formato depende de las capacidades instaladas.
+
+El formato solicitado debe validarse contra las capacidades disponibles antes de iniciar la generación.
+
+---
+
+# 16. Streaming
+
+El streaming constituye una capacidad independiente de la generación de archivos.
+
+Puede utilizar mecanismos como:
+
+- HTTP streaming
+- chunked transfer
+- SSE cuando sea apropiado para eventos
+- protocolos específicos de audio cuando sean necesarios
+
+El protocolo definitivo debe definirse según el tipo de contenido transportado.
+
+SSE no debe utilizarse simplemente como sinónimo de "audio en tiempo real".
+
+---
+
+# 17. Storage
+
+Los artefactos generados pueden almacenarse mediante un sistema de almacenamiento configurable.
+
+El sistema debe abstraer el backend.
+
+Conceptualmente:
+
+```text
+Storage
+├── Save()
+├── Read()
+├── Delete()
+├── Exists()
+└── Metadata()
+```
+
+El backend puede ser local o remoto dependiendo de la instalación.
+
+VOICE STUDIO no debe asumir un proveedor de almacenamiento específico.
+
+---
+
+# 18. Nodes
+
+Un Node representa una instancia participante del sistema.
+
+Ejemplo:
+
+```text
+Node
+├── ID
+├── Identity
+├── Status
+├── Capabilities
+├── Version
+├── Configuration
+└── Health
+```
+
+Las capacidades pueden incluir:
+
+```text
+VOICE_GENERATION
+AUDIO_PROCESSING
+AUDIO_STORAGE
+STREAMING
+API
+WORKER
+```
+
+La lista definitiva debe ser configurable/evolucionable.
+
+---
+
+# 19. Node Registry
+
+El Node Registry mantiene información sobre los nodos conocidos.
+
+Debe permitir:
+
+- registrar
+- identificar
+- autenticar
+- habilitar
+- deshabilitar
+- consultar capacidades
+- comprobar salud
+- registrar actividad
+
+No se presupone una cantidad determinada de nodos.
+
+---
+
+# 20. Configuration
+
+La configuración es una parte fundamental de VOICE STUDIO.
+
+Debe permitir definir, entre otros:
+
+```text
+System
+├── Tenants
+├── Projects
+├── Users
+├── Roles
+├── Permissions
+├── Providers
+├── Voice Profiles
+├── Nodes
+├── Capabilities
+├── Storage
+├── Audio
+├── Streaming
+├── Limits
+├── Security
+└── Policies
+```
+
+No deben existir cantidades fijas codificadas en el sistema.
+
+Por ejemplo, la arquitectura no debe asumir:
+
+```text
+5 radios
+10 televisiones
+20 usuarios
+3 proyectos
+50 voces
+```
+
+Esos valores, si existen, pertenecen exclusivamente a la configuración de una instalación.
+
+---
+
+# 21. Security
+
+VOICE STUDIO debe contemplar:
+
+- autenticación
+- autorización
+- aislamiento tenant
+- control de permisos
+- validación de entradas
+- protección de credenciales
+- protección de endpoints
+- rate limiting cuando corresponda
+- auditoría
+- gestión segura de secretos
+
+Las credenciales de proveedores no deben almacenarse directamente en código fuente.
+
+---
+
+# 22. Audit
+
+Las operaciones críticas deben generar eventos auditables.
+
+Ejemplo:
+
+```text
+AuditEvent
+├── ID
+├── Timestamp
+├── Actor
+├── Tenant
+├── Project
+├── Action
+├── Resource
+├── ResourceID
+├── Result
+└── Metadata
+```
+
+La auditoría debe permitir reconstruir las operaciones relevantes realizadas sobre el sistema.
+
+---
+
+# 23. Health & Capabilities
+
+VOICE STUDIO debe diferenciar:
+
+### Health
+
+Indica si un componente está operativo.
+
+### Readiness
+
+Indica si puede aceptar trabajo.
+
+### Capabilities
+
+Indica qué puede hacer.
+
+Ejemplo:
+
+```text
+Health
+    OK
+
+Readiness
+    READY
+
+Capabilities
+    TTS
+    WAV
+    MP3
+    STREAM
+```
+
+Una capacidad no debe considerarse disponible únicamente porque el servicio esté vivo.
+
+---
+
+# 24. API Conceptual
+
+La API puede organizarse conceptualmente como:
+
+```text
+/api/v1/
+
+    /auth
+    /tenants
+    /projects
+    /users
+    /roles
+    /permissions
+
+    /voices
+    /voice-profiles
+    /providers
+
+    /generations
+    /jobs
+    /audio
+    /stream
+
+    /nodes
+    /capabilities
+
+    /storage
+    /audit
+
+    /health
+    /ready
+```
+
+Los endpoints definitivos deben establecerse mediante contratos independientes.
+
+---
+
+# 25. Ejemplo de generación
+
+Solicitud conceptual:
+
+```http
+POST /api/v1/generations
+Content-Type: application/json
+```
+
+```json
+{
+  "project_id": "project-id",
+  "voice_profile_id": "voice-profile-id",
+  "text": "Texto que será convertido en voz.",
+  "format": "wav"
+}
+```
+
+La respuesta puede devolver un `generation_id`:
+
+```json
+{
+  "generation_id": "generation-id",
+  "status": "queued"
+}
+```
+
+La generación posterior se consulta mediante el recurso correspondiente.
+
+---
+
+# 26. Ejemplo de configuración
+
+Una instalación puede definir:
+
+```yaml
+voice_studio:
+  providers:
+    - id: provider-a
+      type: configured-provider
+
+  projects:
+    - id: project-a
+
+  voice_profiles:
+    - id: voice-a
+      provider: provider-a
+
+  nodes:
+    - id: node-a
+      capabilities:
+        - voice_generation
+        - audio_storage
+```
+
+Esta configuración es solamente ilustrativa.
+
+No representa una cantidad mínima, máxima ni recomendada de recursos.
+
+---
+
+# 27. Variables de Entorno
+
+Las variables de entorno deben utilizarse para valores sensibles o específicos del entorno.
+
+Ejemplo:
+
+```text
+PORT
+DATABASE_URL
+STORAGE_PATH
+PROVIDER_API_KEY
+```
+
+Los nombres definitivos de las variables pertenecen al contrato de configuración.
+
+Las credenciales específicas de cada proveedor deben mantenerse aisladas de la lógica de negocio.
+
+---
+
+# 28. Ejecución
+
+VOICE STUDIO debe poder ejecutarse como una aplicación Go independiente.
+
+Ejemplo:
+
+```bash
+go run ./cmd/server
+```
+
+Para producción:
+
+```bash
+go build ./...
+```
+
+La configuración de producción debe proporcionarse mediante el mecanismo de configuración establecido por la instalación.
+
+---
+
+# 29. Estructura Conceptual del Proyecto
+
+```text
+voice-studio/
+│
+├── cmd/
+│   └── server/
+│
+├── internal/
+│   ├── domain/
+│   │   ├── voice/
+│   │   ├── generation/
+│   │   ├── tenant/
+│   │   ├── project/
+│   │   ├── node/
+│   │   ├── audio/
+│   │   └── audit/
+│   │
+│   ├── application/
+│   │   ├── voice/
+│   │   ├── generation/
+│   │   ├── audio/
+│   │   ├── streaming/
+│   │   └── configuration/
+│   │
+│   ├── infrastructure/
+│   │   ├── providers/
+│   │   │   └── gemini/
+│   │   ├── storage/
+│   │   ├── database/
+│   │   ├── streaming/
+│   │   └── nodes/
+│   │
+│   └── interfaces/
+│       ├── http/
+│       └── middleware/
+│
+├── configs/
+├── migrations/
+├── docs/
+├── go.mod
+└── README.md
+```
+
+Esta estructura es conceptual y puede evolucionar durante la definición de los contratos técnicos.
+
+---
+
+# 30. Restricciones Arquitectónicas
+
+VOICE STUDIO **NO DEBE**:
+
+- asumir un tipo específico de cliente
+- asumir una industria específica
+- asumir una cantidad fija de usuarios
+- asumir una cantidad fija de proyectos
+- asumir una cantidad fija de radios
+- asumir una cantidad fija de televisiones
+- asumir una cantidad fija de canales
+- asumir una cantidad fija de nodos
+- asumir una cantidad fija de voces
+- asumir un proveedor único
+- acoplar el dominio a Gemini
+- almacenar credenciales en código
+- mezclar generación con almacenamiento
+- mezclar generación con streaming
+- convertir SSE en requisito universal de audio
+- fijar parámetros de audio sin contrato
+- utilizar ejemplos comerciales como reglas arquitectónicas
+
+---
+
+# 31. Configurabilidad
+
+Todo recurso dependiente de la instalación debe ser configurable.
+
+La plataforma debe poder crecer de:
+
+```text
+0 → N
+```
+
+en todos los recursos donde el dominio lo permita.
+
+El número concreto de:
+
+- tenants
+- proyectos
+- usuarios
+- perfiles
+- voces
+- proveedores
+- nodos
+- canales
+- recursos
+- trabajos
+
+no forma parte del contrato arquitectónico salvo que una restricción técnica específica lo establezca.
+
+---
+
+# 32. Neutralidad del Sistema
+
+VOICE STUDIO no debe incorporar nombres, organizaciones, profesiones, medios de comunicación o escenarios comerciales concretos como parte del núcleo arquitectónico.
+
+Los ejemplos utilizados en documentación deben considerarse exclusivamente ejemplos.
+
+La configuración de cada instalación determina su realidad operativa.
+
+---
+
+# 33. Objetivo Final
+
+VOICE STUDIO debe proporcionar una plataforma:
+
+- configurable
+- extensible
+- multi-tenant
+- segura
+- auditable
+- independiente de proveedor
+- preparada para múltiples nodos
+- preparada para múltiples capacidades
+- orientada a jobs
+- preparada para procesamiento de audio
+- preparada para streaming
+- preparada para diferentes instalaciones
+
+sin imponer al sistema una estructura comercial, operativa o de capacidad que no haya sido definida explícitamente mediante configuración o contrato.
+
+---
+
+# 34. Estado del Documento
+
+**Documento:** VOICE STUDIO  
+**Tipo:** Architectural Foundation  
+**Tecnología:** Go  
+**Arquitectura:** Clean / Modular / Provider-Agnostic  
+**Configuración:** Required  
+**Multi-Tenant:** Supported  
+**Node-Aware:** Required  
+**Provider-Agnostic:** Required  
+**Audit:** Required  
+**Fixed Capacity Assumptions:** Prohibited
+
+---
+
+## Principio fundamental
+
+> **VOICE STUDIO define capacidades, contratos y mecanismos. La instalación define quién, qué, cuánto y cómo se utilizan.**
